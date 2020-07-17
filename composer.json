@@ -1,0 +1,22 @@
+{
+    "name": "selectpdf/selectpdf-api-client",
+    "type": "library",
+    "version": "1.0.0",
+    "description": "PHP client for SelectPdf Online REST API",
+    "keywords": ["html-to-pdf", "pdf", "web service", "api", "client", "convert", "converter"],
+    "homepage": "https://selectpdf.com/html-to-pdf-api/",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "SelectPdf",
+            "email": "support@selectpdf.com",
+            "homepage": "https://selectpdf.com/"
+        }
+    ],
+    "require": {
+        "php": ">=5.3.10"
+    },
+    "autoload": {
+        "classmap": ["SelectPdf.Api.php"]
+    }
+}
