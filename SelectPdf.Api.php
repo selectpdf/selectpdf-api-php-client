@@ -1,7 +1,9 @@
 <?php
-
 /**
- * SelectPdf Online API .NET Client.
+ * SelectPdf Online API PHP Client.
+ * 
+ * SelectPdf Online REST API is a professional solution for managing PDF documents online. 
+ * This is the dedicated PHP client library that can be setup in minutes.
  */
 namespace SelectPdf\Api {
 
@@ -23,11 +25,29 @@ namespace SelectPdf\Api {
      */
     class ApiClient
     {
+        public const CLIENT_VERSION = '1.4.0';
+        protected const MULTIPART_FORM_DATA_BOUNDARY = "------------SelectPdf_Api_Boundry_$";
+        protected const NEW_LINE = "\r\n";
+
         /**
          * API endpoint
          * @var mixed
          */
         protected $apiEndpoint = "https://selectpdf.com/api2/convert/";
+
+        /**
+         * API endpoint for async jobs
+         * @var mixed
+         * 
+         */
+        protected $apiAsyncEndpoint = "https://selectpdf.com/api2/asyncjob/";
+
+        /**
+         * API endpoint for web elements
+         * @var mixed
+         * 
+         */
+        protected $apiWebElementsEndpoint = "https://selectpdf.com/api2/webelements/";
 
         /**
          * Parameters that will be sent to the API.
@@ -42,12 +62,75 @@ namespace SelectPdf\Api {
         protected $headers = array();
 
         /**
+         * Files that will be uploaded to the API.
+         * @var mixed
+         */
+        protected $files = array();
+
+        /**
+         * Binary data that will be uploaded to the API.
+         * @var mixed
+         */
+        protected $binaryData = array();
+
+        /**
+         * Number of pages of the pdf document resulted from the conversion.
+         */
+        protected $numberOfPages = 0;
+
+        /**
+         * Job ID for asynchronous calls or for calls that require a second request.
+         */
+        protected $jobId = "";
+
+        /**
+         * Last HTTP Code
+         */
+        protected $lastHTTPCode = 0;
+
+        /**
+         * Ping interval in seconds for asynchronous calls. Default value is 3 seconds.
+         */
+        public $AsyncCallsPingInterval = 3;
+
+        /**
+         * Maximum number of pings for asynchronous calls. Default value is 1,000 pings.
+         */
+        public $AsyncCallsMaxPings = 1000;
+
+        /**
          * Set a custom SelectPdf API endpoint. Do not use this method unless advised by SelectPdf.
          * @param mixed $apiEndpoint API endpoint.
          */
         public function setApiEndpoint($apiEndpoint)
         {
             $this->apiEndpoint = $apiEndpoint;
+        }
+
+        /**
+         * Set a custom SelectPdf API endpoint for async jobs. Do not use this method unless advised by SelectPdf.
+         * @param mixed $apiAsyncEndpoint API async jobs endpoint.
+         */
+        public function setApiAsyncEndpoint($apiAsyncEndpoint)
+        {
+            $this->apiAsyncEndpoint = $apiAsyncEndpoint;
+        }
+
+        /**
+         * Set a custom SelectPdf API endpoint for web elements. Do not use this method unless advised by SelectPdf.
+         * @param mixed $apiWebElementsEndpoint API web elements endpoint.
+         */
+        public function setApiWebElementsEndpoint($apiWebElementsEndpoint)
+        {
+            $this->apiWebElementsEndpoint = $apiWebElementsEndpoint;
+        }
+
+        /**
+         * Get the number of pages of the PDF document resulted from the API call.
+         * @return int Number of pages of the PDF document.
+         */
+        public function getNumberOfPages() {
+            return $this->numberOfPages;
         }
 
         /**
@@ -58,12 +141,21 @@ namespace SelectPdf\Api {
          */
         protected function performPost($outStream)
         {
+            $this->headers["selectpdf-api-client"] = "php-" . constant('PHP_VERSION') . "-" . ApiClient::CLIENT_VERSION;
+
+            //reset results
+            $this->numberOfPages = 0;
+            $this->jobId = "";
+            $this->lastHTTPCode = 0;
+  
             // build headers string
             $allheaders = "Content-type: application/x-www-form-urlencoded\r\n";
 
             foreach($this->headers as $headerKey => $headerValue) {
                 $allheaders = "$allheaders$headerKey: $headerValue\r\n";
             }
+
+            //print_r($this->parameters);
 
             // for options use key 'http' even if you send the request to https://...
             $options = array(
@@ -85,31 +177,179 @@ namespace SelectPdf\Api {
                 $this->parseResponseHeaders($http_response_header, $code, $message);
             }
 
+            $this->lastHTTPCode = $code;
             if ($code === 0) {
                 $error = error_get_last();
                 $message = $error['message'];
             }
 
-            // not ok - throw exception
-            if ($code != 200) {
+            if ($code === 200) {
+                // all ok - return pdf or write to stream
+                if ($outStream == null)
+                    return $result;
+
+                $written = fwrite($outStream, $result);
+                if ($written != strlen($result)) {
+                    if (get_magic_quotes_runtime()) {
+                        throw new ApiException("Error writing the PDF file to the specified path. This happens because the 'magic_quotes_runtime' setting is enabled. Please disable it either in php.ini file or in code by calling 'set_magic_quotes_runtime(false)'.");
+                    }
+                    throw new ApiException('Error writing the PDF file to the specified path.');
+                }
+            }
+            else if ($code === 202) {
+                // request accepted (for asynchronous jobs)
+                // jobId should have been filled in parseResponseHeaders above
+                return null;
+            }
+            else {
+                // not ok - throw exception
                 if ($result) {
                     $message = $result;
                 }
                 throw new ApiException($message, $code);
             }
 
-            // all ok - return pdf or write to stream
-            if ($outStream == null)
-                return $result;
 
-            $written = fwrite($outStream, $result);
-            if ($written != strlen($result)) {
-                if (get_magic_quotes_runtime()) {
-                    throw new ApiException("Error writing the PDF file to the specified path. This happens because the 'magic_quotes_runtime' setting is enabled. Please disable it either in php.ini file or in code by calling 'set_magic_quotes_runtime(false)'.");
-                }
-                throw new ApiException('Error writing the PDF file to the specified path.');
+        }
+
+        /**
+         * Create a multipart/form-data POST request (that can handle file uploads).
+         * @param mixed $outStream Output response to this stream, if specified.
+         * @throws ApiException
+         * @return string If output stream is not specified, return response as string.
+         */
+        protected function performPostAsMultipartFormData($outStream)
+        {
+            $this->headers["selectpdf-api-client"] = "php-" . constant('PHP_VERSION') . "-" . ApiClient::CLIENT_VERSION;
+
+            //reset results
+            $this->numberOfPages = 0;
+            $this->jobId = "";
+            $this->lastHTTPCode = 0;
+    
+            // serialize parameters
+            $byteData = $this->encodeMultipartFormData();
+
+            // build headers string
+            $allheaders = "Content-Type: multipart/form-data; boundary=" . self::MULTIPART_FORM_DATA_BOUNDARY . "\r\nContent-Length: " . strlen($byteData) . "\r\n";
+
+            foreach($this->headers as $headerKey => $headerValue) {
+                $allheaders = "$allheaders$headerKey: $headerValue\r\n";
             }
 
+            //print_r($this->parameters);
+            //echo($allheaders);
+            //echo($byteData);
+
+            // for options use key 'http' even if you send the request to https://...
+            $options = array(
+                'http' => array(
+                    'header'  => $allheaders,
+                    'method'  => 'POST',
+                    'content' => $byteData,
+                    'ignore_errors' => true,
+                    'timeout' => 600 // timeout in seconds 600s=10minutes
+                ),
+            );
+
+            $context  = stream_context_create($options);
+            $result = @file_get_contents($this->apiEndpoint, false, $context);
+
+            $code = 0;
+            $message = "";
+            if (isset($http_response_header)) {
+                $this->parseResponseHeaders($http_response_header, $code, $message);
+            }
+
+            $this->lastHTTPCode = $code;
+            if ($code === 0) {
+                $error = error_get_last();
+                $message = $error['message'];
+            }
+
+            if ($code === 200) {
+                // all ok - return pdf or write to stream
+                if ($outStream == null)
+                    return $result;
+
+                $written = fwrite($outStream, $result);
+                if ($written != strlen($result)) {
+                    if (get_magic_quotes_runtime()) {
+                        throw new ApiException("Error writing the PDF file to the specified path. This happens because the 'magic_quotes_runtime' setting is enabled. Please disable it either in php.ini file or in code by calling 'set_magic_quotes_runtime(false)'.");
+                    }
+                    throw new ApiException('Error writing the PDF file to the specified path.');
+                }
+            }
+            else if ($code === 202) {
+                // request accepted (for asynchronous jobs)
+                // jobId should have been filled in parseResponseHeaders above
+                return null;
+            }
+            else {
+                // not ok - throw exception
+                if ($result) {
+                    $message = $result;
+                }
+                throw new ApiException($message, $code);
+            }
+
+
+        }
+
+        /**
+         * Encode data for multipart/form-data POST
+         */
+        private function encodeMultipartFormData() {
+            $allData = '';
+
+            foreach ($this->parameters as $key => $value) {
+                $allData .= "--" . self::MULTIPART_FORM_DATA_BOUNDARY . self::NEW_LINE;
+                $allData .= 'Content-Disposition: form-data; name="' . $key . '"' . self::NEW_LINE;
+                $allData .= self::NEW_LINE;
+                $allData .= $value . self::NEW_LINE;
+            }
+    
+            foreach ($this->files as $key => $value) {
+                $allData .= "--" . self::MULTIPART_FORM_DATA_BOUNDARY . self::NEW_LINE;
+                $allData .= 'Content-Disposition: form-data; name="' . $key . '";' . ' filename="' . $value . '"' . self::NEW_LINE;
+                $allData .= 'Content-Type: application/octet-stream' . self::NEW_LINE;
+                $allData .= self::NEW_LINE;
+                $allData .= file_get_contents($value);
+                $allData .= self::NEW_LINE;
+            }
+    
+            foreach ($this->binaryData as $key => $value) {
+                $allData .= "--" . self::MULTIPART_FORM_DATA_BOUNDARY . self::NEW_LINE;
+                $allData .= 'Content-Disposition: form-data; name="' . $key . '";' . ' filename="' . $key . '"' . self::NEW_LINE;
+                $allData .= 'Content-Type: application/octet-stream' . self::NEW_LINE;
+                $allData .= self::NEW_LINE;
+                $allData .= $value;
+                $allData .= self::NEW_LINE;
+            }
+    
+            return $allData . "--" . self::MULTIPART_FORM_DATA_BOUNDARY . "--". self::NEW_LINE . self::NEW_LINE;
+        }
+
+        /**
+         * Start an asynchronous job.
+         * 
+         * @return string Asynchronous job ID.
+         */
+        protected function startAsyncJob() {
+            $this->parameters["async"] = "True";
+            $this->performPost(null);
+            return $this->jobId;
+        }
+
+        /**
+         * Start an asynchronous job that requires multipart forma data.
+         * 
+         * @return string Asynchronous job ID.
+         */
+        protected function startAsyncJobMultipartFormData() {
+            $this->parameters["async"] = "True";
+            $this->performPostAsMultipartFormData(null);
+            return $this->jobId;
         }
 
         /**
@@ -132,7 +372,11 @@ namespace SelectPdf\Api {
                     if (preg_match('/HTTP\/\d\.\d\s+(\d+)\s*.*/', $header, $matches)) {
                         $code = intval($matches[1]);
                         $message = $matches[0];
-                    }
+                    } else if(preg_match('/selectpdf-api-jobid:\s+(.*)/', $header, $matches)) {
+                        $this->jobId = $matches[1];
+                    } else if(preg_match('/selectpdf-api-pages:\s+(.*)/', $header, $matches)) {
+                        $this->numberOfPages = intval($matches[1]);
+                    }                
                 }
             }
         }
@@ -171,6 +415,85 @@ namespace SelectPdf\Api {
     }
 
     /**
+     * Get the result of an asynchronous call.
+     */
+    class AsyncJobClient extends ApiClient {
+        /**
+         * Construct the async job client.
+         * @param mixed $apiKey API Key.
+         * @param mixed $jobId Job ID.
+         */
+        public function __construct($apiKey, $jobId) {
+            $this->apiEndpoint = "https://selectpdf.com/api2/asyncjob/";
+            $this->parameters["key"] = $apiKey;
+            $this->parameters["job_id"] = $jobId;
+        }
+
+        /**
+         * Get result of the asynchronous job.
+         * @return mixed Byte array containing the resulted file if the job is finished. Returns Null if the job is still running. Throws an exception if an error occurred.
+         */
+        public function getResult() {
+            $result = $this->performPost(null);
+
+            if (empty($this->jobId)) {
+                // job finished
+                return $result;
+            }
+            else {
+                // job is still running
+                return null;
+            }
+        }
+
+        /**
+         * Check if asynchronous job is finished.
+         * @return mixed True if job finished.
+         */
+        public function finished() {
+            // 200 OK - the job is finished (successfully). 
+            // 202 Accepted - the job is still running. 
+            // 499 (or some other error code) - error - job is finished (with error).
+            return $this->lastHTTPCode !== 202;
+        }
+    }
+
+    /**
+     *  Get the locations of certain web elements. 
+     *  This is retrieved if pdf_web_elements_selectors parameter was set during the initial conversion call and elements were found to match the selectors.
+     */
+    class WebElementsClient extends ApiClient {
+        /**
+         * Construct the web elements client.
+         * @param mixed $apiKey API Key.
+         * @param mixed $jobId Job ID.
+         */
+        public function __construct($apiKey, $jobId) {
+            $this->apiEndpoint = "https://selectpdf.com/api2/webelements/";
+            $this->parameters["key"] = $apiKey;
+            $this->parameters["job_id"] = $jobId;
+        }
+
+        /**
+         * Get the locations of certain web elements. 
+         * This is retrieved if pdf_web_elements_selectors parameter is set and elements were found to match the selectors.
+         * @return mixed List of web elements locations.
+         */
+        public function getWebElements() {
+            $this->headers["Accept"] = "text/json";
+
+            $result = $this->performPost(null);
+
+            if ($result) {
+                return json_decode($result, true);
+            }
+            else {
+                return array();
+            }
+       }
+    }
+
+    /**
      * PDF page size.
      */
     class PageSize {
@@ -178,6 +501,11 @@ namespace SelectPdf\Api {
          * Custom page size.
          */
         const Custom = "Custom";
+
+        /**
+         * A0 page size.
+         */
+        const A0 = "A0";
 
         /**
          * A1 page size.
@@ -203,6 +531,21 @@ namespace SelectPdf\Api {
          * A5 page size.
          */
         const A5 = "A5";
+
+        /**
+         * A6 page size.
+         */
+        const A6 = "A6";
+
+        /**
+         * A7 page size.
+         */
+        const A7 = "A7";
+
+        /**
+         * A8 page size.
+         */
+        const A8 = "A8";
 
         /**
          * Letter page size.
@@ -377,7 +720,99 @@ namespace SelectPdf\Api {
     }
 
     /**
+     * The output text layout (for pdf to text calls).
+     */
+    class TextLayout {
+        /**
+         * The original layout of the text from the PDF document is preserved.
+         */
+        const Original = 0;
+
+        /**
+         * The text is produced in reading order.
+         */
+        const Reading = 1;
+    }
+
+    /**
+     * The output format (for pdf to text calls).
+     */
+    class OutputFormat {
+        /**
+         * Text.
+         */
+        const Text = 0;
+
+        /**
+         * Html.
+         */
+        const Html = 1;
+    }
+
+    /**
      * Html To Pdf Conversion with SelectPdf Online API.
+     * 
+     * ```php
+     * <?php
+     *  require("SelectPdf.Api.php");
+     *
+     *  $url = 'https://selectpdf.com';
+     *  $localFile = "Test.pdf";
+     *  $apiKey = "Your API key here";
+     *
+     *  echo ("This is SelectPdf-" . SelectPdf\Api\ApiClient::CLIENT_VERSION . ".\n");
+     *
+     *  try {
+     *      $client = new SelectPdf\Api\HtmlToPdfClient($apiKey);
+     *
+     *      // set parameters - see full list at https://selectpdf.com/html-to-pdf-api/
+     *      $client
+     *          // main properties
+     *
+     *          ->setPageSize(SelectPdf\Api\PageSize::A4) // PDF page size
+     *          ->setPageOrientation(SelectPdf\Api\PageOrientation::Portrait) // PDF page orientation
+     *          ->setMargins(0) // PDF page margins
+     *          ->setRenderingEngine(SelectPdf\Api\RenderingEngine::WebKit) // rendering engine
+     *          ->setConversionDelay(1) // conversion delay
+     *          ->setNavigationTimeout(30) // navigation timeout 
+     *          ->setShowPageNumbers(false) // page numbers
+     *          ->setPageBreaksEnhancedAlgorithm(true) // enhanced page break algorithm
+     *
+     *          // additional properties
+     *
+     *          // ->setUseCssPrint(true) // enable CSS media print
+     *          // ->setDisableJavascript(true) // disable javascript
+     *          // ->setDisableInternalLinks(true) // disable internal links
+     *          // ->setDisableExternalLinks(true) // disable external links
+     *          // ->setKeepImagesTogether(true) // keep images together
+     *          // ->setScaleImages(true) // scale images to create smaller pdfs
+     *          // ->setSinglePagePdf(true) // generate a single page PDF
+     *          // ->setUserPassword("password") // secure the PDF with a password
+     *
+     *          // generate automatic bookmarks
+     *
+     *          // ->setPdfBookmarksSelectors("H1, H2") // create outlines (bookmarks) for the specified elements
+     *          // ->setViewerPageMode(SelectPdf\Api\PageMode::UseOutlines) // display outlines (bookmarks) in viewer
+     *      ;
+     *
+     *      echo ("Starting conversion ...\n");
+     *      
+     *      // convert url to file
+     *      $client->convertUrlToFile($url, $localFile);
+     *
+     *      echo ("Finished! Number of pages: " . $client->getNumberOfPages() . ".\n");
+     *
+     *      // get API usage
+     *      $usageClient = new \SelectPdf\Api\UsageClient($apiKey);
+     *      $usage = $usageClient->getUsage(true);
+     *      echo("Conversions remained this month: " . $usage["available"] . ".\n");
+     *
+     *  }
+     *  catch (Exception $ex) {
+     *      echo("An error occurred: " . $ex . ".\n");
+     *  }
+     *  ?>
+     * ```
      */
     class HtmlToPdfClient extends ApiClient {
         /**
@@ -405,6 +840,9 @@ namespace SelectPdf\Api {
                 throw new ApiException("Cannot convert local urls. SelectPdf online API can only convert publicly available urls.");
             }
             $this->parameters["url"] = $url;
+            $this->parameters["html"] = "";
+            $this->parameters["base_url"] = "";
+            $this->parameters["async"] = "False";
 
             return $this->performPost(null);
         }
@@ -424,6 +862,9 @@ namespace SelectPdf\Api {
                 throw new ApiException("Cannot convert local urls. SelectPdf online API can only convert publicly available urls.");
             }
             $this->parameters["url"] = $url;
+            $this->parameters["html"] = "";
+            $this->parameters["base_url"] = "";
+            $this->parameters["async"] = "False";
 
             $this->performPost(stream);
         }
@@ -443,6 +884,9 @@ namespace SelectPdf\Api {
                 throw new ApiException("Cannot convert local urls. SelectPdf online API can only convert publicly available urls.");
             }
             $this->parameters["url"] = $url;
+            $this->parameters["html"] = "";
+            $this->parameters["base_url"] = "";
+            $this->parameters["async"] = "False";
 
             $outputFile = fopen($filePath, "wb");
 
@@ -461,6 +905,83 @@ namespace SelectPdf\Api {
         }
 
         /**
+         * Convert the specified url to PDF using an asynchronous call. SelectPdf online API can convert http:// and https:// publicly available urls.
+         * @param mixed $url Address of the web page being converted.
+         * @throws ApiException
+         * @return string String containing the resulted PDF.
+         */
+        public function convertUrlAsync($url)
+        {
+            if (strncasecmp($url, "http://", 7) != 0 && strncasecmp($url, "https://", 8) != 0) {
+                throw new ApiException("The supported protocols for the converted webpage are http:// and https://.");
+            }
+            if (strncasecmp($url, "http://localhost", 16) === 0) {
+                throw new ApiException("Cannot convert local urls. SelectPdf online API can only convert publicly available urls.");
+            }
+            $this->parameters["url"] = $url;
+            $this->parameters["html"] = "";
+            $this->parameters["base_url"] = "";
+
+            $JobID = $this->startAsyncJob();
+
+            if ($JobID == null || $JobID === '')
+            {
+                throw new ApiException("An error occurred launching the asynchronous call.");
+            }
+
+            $noPings = 0;
+
+            do
+            {
+                $noPings++;
+
+                // sleep for a few seconds before next ping
+                sleep($this->AsyncCallsPingInterval);
+
+                $asyncJobClient = new AsyncJobClient($this->parameters["key"], $JobID);
+                $asyncJobClient->setApiEndpoint($this->apiAsyncEndpoint);
+
+                $result = $asyncJobClient->getResult();
+
+                if ($asyncJobClient->finished())
+                {
+                    $this->numberOfPages = $asyncJobClient->getNumberOfPages();
+
+                    return $result;
+                }
+
+            } while ($noPings <= $this->AsyncCallsMaxPings);
+
+            throw new ApiException("Asynchronous call did not finish in expected timeframe.");
+
+        }
+
+        /**
+         * Convert the specified url to PDF using an asynchronous call and writes the resulted PDF to an output stream. SelectPdf online API can convert http:// and https:// publicly available urls.
+         * @param mixed $url Address of the web page being converted.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function convertUrlToStreamAsync($url, $stream)
+        {
+            $result = $this->convertUrlAsync($url);
+            fwrite($stream, $result);
+        }
+
+        /**
+         * Convert the specified url to PDF using an asynchronous call and writes the resulted PDF to a local file. 
+         * SelectPdf online API can convert http:// and https:// publicly available urls.
+         * @param mixed $url Address of the web page being converted.
+         * @param mixed $filePath Local file including path if necessary.
+         * @throws ApiException
+         */
+        public function convertUrlToFileAsync($url, $filePath)
+        {
+            $result = $this->convertUrlAsync($url);
+            file_put_contents($filePath, $result);
+        }
+
+        /**
          * Convert the specified HTML string to PDF. Use a base url to resolve relative paths to resources.
          * @param mixed $htmlString HTML string with the content being converted.
          * @param mixed $baseUrl Base url used to resolve relative paths to resources (css, images, javascript, etc). Must be a http:// or https:// publicly available url.
@@ -469,6 +990,8 @@ namespace SelectPdf\Api {
         public function convertHtmlStringWithBaseUrl($htmlString, $baseUrl)
         {
             $this->parameters["html"] = $htmlString;
+            $this->parameters["url"] = "";
+            $this->parameters["async"] = "False";
 
             if ($baseUrl != null && $baseUrl !== '')
             {
@@ -484,9 +1007,11 @@ namespace SelectPdf\Api {
          * @param mixed $baseUrl Base url used to resolve relative paths to resources (css, images, javascript, etc). Must be a http:// or https:// publicly available url.
          * @param mixed $stream The output stream where the resulted PDF will be written.
          */
-        public function convertHtmlStringToStreamWithBaseUrl($htmlString, $baseUrl, $stream)
+        public function convertHtmlStringWithBaseUrlToStream($htmlString, $baseUrl, $stream)
         {
             $this->parameters["html"] = $htmlString;
+            $this->parameters["url"] = "";
+            $this->parameters["async"] = "False";
 
             if ($baseUrl != null && $baseUrl !== '')
             {
@@ -503,9 +1028,11 @@ namespace SelectPdf\Api {
          * @param mixed $filePath Local file including path if necessary.
          * @throws ApiException
          */
-        public function convertHtmlStringToFileWithBaseUrl($htmlString, $baseUrl, $filePath)
+        public function convertHtmlStringWithBaseUrlToFile($htmlString, $baseUrl, $filePath)
         {
             $this->parameters["html"] = $htmlString;
+            $this->parameters["url"] = "";
+            $this->parameters["async"] = "False";
 
             if ($baseUrl != null && $baseUrl !== '')
             {
@@ -525,6 +1052,81 @@ namespace SelectPdf\Api {
                 unlink($filePath);
                 throw $ex;
             }
+        }
+
+        /**
+         * Convert the specified HTML string to PDF using an asynchronous call. Use a base url to resolve relative paths to resources.
+         * @param mixed $htmlString HTML string with the content being converted.
+         * @param mixed $baseUrl Base url used to resolve relative paths to resources (css, images, javascript, etc). Must be a http:// or https:// publicly available url.
+         * @return string String containing the resulted PDF.
+         */
+        public function convertHtmlStringWithBaseUrlAsync($htmlString, $baseUrl)
+        {
+            $this->parameters["html"] = $htmlString;
+            $this->parameters["url"] = "";
+
+            if ($baseUrl != null && $baseUrl !== '')
+            {
+                $this->parameters["base_url"] = $baseUrl;
+            }
+
+            $JobID = $this->startAsyncJob();
+
+            if ($JobID == null || $JobID === '')
+            {
+                throw new ApiException("An error occurred launching the asynchronous call.");
+            }
+
+            $noPings = 0;
+
+            do
+            {
+                $noPings++;
+
+                // sleep for a few seconds before next ping
+                sleep($this->AsyncCallsPingInterval);
+
+                $asyncJobClient = new AsyncJobClient($this->parameters["key"], $JobID);
+                $asyncJobClient->setApiEndpoint($this->apiAsyncEndpoint);
+
+                $result = $asyncJobClient->getResult();
+
+                if ($asyncJobClient->finished())
+                {
+                    $this->numberOfPages = $asyncJobClient->getNumberOfPages();
+
+                    return $result;
+                }
+
+            } while ($noPings <= $this->AsyncCallsMaxPings);
+
+            throw new ApiException("Asynchronous call did not finish in expected timeframe.");
+
+        }
+
+        /**
+         * Convert the specified HTML string to PDF using an asynchronous call and writes the resulted PDF to an output stream. Use a base url to resolve relative paths to resources.
+         * @param mixed $htmlString HTML string with the content being converted.
+         * @param mixed $baseUrl Base url used to resolve relative paths to resources (css, images, javascript, etc). Must be a http:// or https:// publicly available url.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         */
+        public function convertHtmlStringWithBaseUrlToStreamAsync($htmlString, $baseUrl, $stream)
+        {
+            $result = $this->convertHtmlStringWithBaseUrlAsync($htmlString, $baseUrl);
+            fwrite($stream, $result);
+        }
+
+        /**
+         * Convert the specified HTML string to PDF using an asynchronous call and writes the resulted PDF to a local file. Use a base url to resolve relative paths to resources.
+         * @param mixed $htmlString HTML string with the content being converted.
+         * @param mixed $baseUrl Base url used to resolve relative paths to resources (css, images, javascript, etc). Must be a http:// or https:// publicly available url.
+         * @param mixed $filePath Local file including path if necessary.
+         * @throws ApiException
+         */
+        public function convertHtmlStringWithBaseUrlToFileAsync($htmlString, $baseUrl, $filePath)
+        {
+            $result = $this->convertHtmlStringWithBaseUrlAsync($htmlString, $baseUrl);
+            file_put_contents($filePath, $result);
         }
 
         /**
@@ -544,7 +1146,7 @@ namespace SelectPdf\Api {
          */
         public function convertHtmlStringToStream($htmlString, $stream)
         {
-            $this->convertHtmlStringToStreamWithBaseUrl($htmlString, null, $stream);
+            $this->convertHtmlStringWithBaseUrlToStream($htmlString, null, $stream);
         }
 
         /**
@@ -554,12 +1156,42 @@ namespace SelectPdf\Api {
          */
         public function convertHtmlStringToFile($htmlString, $filePath)
         {
-            $this->convertHtmlStringToFileWithBaseUrl($htmlString, null, $filePath);
+            $this->convertHtmlStringWithBaseUrlToFile($htmlString, null, $filePath);
+        }
+
+        /**
+         * Convert the specified HTML string to PDF using an asynchronous call.
+         * @param mixed $htmlString HTML string with the content being converted.
+         * @return string String containing the resulted PDF.
+         */
+        public function convertHtmlStringAsync($htmlString)
+        {
+            return $this->convertHtmlStringWithBaseUrlAsync($htmlString, null);
+        }
+
+        /**
+         * Convert the specified HTML string to PDF using an asynchronous call and writes the resulted PDF to an output stream.
+         * @param mixed $htmlString HTML string with the content being converted.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         */
+        public function convertHtmlStringToStreamAsync($htmlString, $stream)
+        {
+            $this->convertHtmlStringWithBaseUrlToStreamAsync($htmlString, null, $stream);
+        }
+
+        /**
+         * Convert the specified HTML string to PDF using an asynchronous call and writes the resulted PDF to a local file.
+         * @param mixed $htmlString HTML string with the content being converted.
+         * @param mixed $filePath Local file including path if necessary.
+         */
+        public function convertHtmlStringToFileAsync($htmlString, $filePath)
+        {
+            $this->convertHtmlStringWithBaseUrlToFileAsync($htmlString, null, $filePath);
         }
 
         /**
          * Set PDF page size. Default value is A4. If page size is set to Custom, use setPageWidth and setPageHeight methods to set the custom width/height of the PDF pages.
-         * @param mixed $pageSize PDF page size. Possible values: Custom, A1, A2, A3, A4, A5, Letter, HalfLetter, Ledger, Legal. Use constants from \SelectPdf\Api\PageSize class.
+         * @param mixed $pageSize PDF page size. Possible values: Custom, A1, A2, A3, A4, A5, Letter, HalfLetter, Ledger, Legal. Use constants from {@see \SelectPdf\Api\PageSize} class.
          * @throws ApiException
          * @return HtmlToPdfClient Reference to the current object.
          */
@@ -573,7 +1205,8 @@ namespace SelectPdf\Api {
         }
 
         /**
-         * Set PDF page width in points. Default value is 595pt (A4 page width in points). 1pt = 1/72 inch. This is taken into account only if page size is set to Custom using setPageSize method.
+         * Set PDF page width in points. Default value is 595pt (A4 page width in points). 1pt = 1/72 inch. 
+         * This is taken into account only if page size is set to {@see \SelectPdf\Api\PageSize::Custom} using {@see \SelectPdf\Api\HtmlToPdfClient::setPageSize()} method.
          * @param mixed $pageWidth Page width in points.
          * @return HtmlToPdfClient Reference to the current object.
          */
@@ -584,7 +1217,8 @@ namespace SelectPdf\Api {
         }
 
         /**
-         * Set PDF page height in points. Default value is 842pt (A4 page height in points). 1pt = 1/72 inch. This is taken into account only if page size is set to Custom using setPageSize method.
+         * Set PDF page height in points. Default value is 842pt (A4 page height in points). 1pt = 1/72 inch. 
+         * This is taken into account only if page size is set to {@see \SelectPdf\Api\PageSize::Custom} using {@see \SelectPdf\Api\HtmlToPdfClient::setPageSize()} method.
          *
          * @param mixed $pageHeight Page height in points.
          * @return HtmlToPdfClient Reference to the current object.
@@ -597,7 +1231,7 @@ namespace SelectPdf\Api {
 
         /**
          * Set PDF page orientation. Default value is Portrait.
-         * @param mixed $pageOrientation PDF page orientation. Possible values: Portrait, Landscape. Use constants from \SelectPdf\Api\PageOrientation class.
+         * @param mixed $pageOrientation PDF page orientation. Possible values: Portrait, Landscape. Use constants from {@see \SelectPdf\Api\PageOrientation} class.
          * @return HtmlToPdfClient Reference to the current object.
          */
         public function setPageOrientation($pageOrientation)
@@ -1135,6 +1769,27 @@ namespace SelectPdf\Api {
             return $this;
         }
 
+        /**
+         * Set the width in pixels used by the converter's internal browser window during the conversion of the header content. The default value is 1024px.
+         * @param mixed $headerWebPageWidth Browser window width in pixels.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setHeaderWebPageWidth($headerWebPageWidth)
+        {
+            $this->parameters["header_web_page_width"] = $headerWebPageWidth;
+            return $this;
+        }
+
+        /**
+         * Set the height in pixels used by the converter's internal browser window during the conversion of the header content. The default value is 1024px.
+         * @param mixed $headerWebPageHeight Browser window height in pixels.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setHeaderWebPageHeight($headerWebPageHeight)
+        {
+            $this->parameters["header_web_page_height"] = $headerWebPageHeight;
+            return $this;
+        }
 
         /**
          * Control if a custom footer is displayed in the generated PDF document. The default value is False.
@@ -1251,6 +1906,28 @@ namespace SelectPdf\Api {
             return $this;
         }
 
+        /**
+         * Set the width in pixels used by the converter's internal browser window during the conversion of the footer content. The default value is 1024px.
+         * @param mixed $footerWebPageWidth Browser window width in pixels.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setFooterWebPageWidth($footerWebPageWidth)
+        {
+            $this->parameters["footer_web_page_width"] = $footerWebPageWidth;
+            return $this;
+        }
+
+        /**
+         * Set the height in pixels used by the converter's internal browser window during the conversion of the footer content. The default value is 1024px.
+         * @param mixed $footerWebPageHeight Browser window height in pixels.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setFooterWebPageHeight($footerWebPageHeight)
+        {
+            $this->parameters["footer_web_page_height"] = $footerWebPageHeight;
+            return $this;
+        }
+
 
         /**
          * Show page numbers. Default value is True. Page numbers will be displayed in the footer of the PDF document.
@@ -1361,7 +2038,7 @@ namespace SelectPdf\Api {
 
         /**
          * Generate automatic bookmarks in pdf. The elements that will be bookmarked are defined using CSS selectors. For example, the selector for all the H1 elements is "H1", the selector for all the elements with the CSS class name 'myclass' is "*.myclass" and the selector for the elements with the id 'myid' is "*#myid". Read more about CSS selectors <a href="http://www.w3schools.com/cssref/css_selectors.asp" target="_blank">here</a>.
-         * @param mixed $selectors CSS selectors used to identify HTML elements.
+         * @param mixed $selectors CSS selectors used to identify HTML elements, comma separated.
          * @return HtmlToPdfClient Reference to the current object.
          */
         public function setPdfBookmarksSelectors($selectors)
@@ -1372,7 +2049,7 @@ namespace SelectPdf\Api {
 
         /**
          * Exclude page elements from the conversion. The elements that will be excluded are defined using CSS selectors. For example, the selector for all the H1 elements is "H1", the selector for all the elements with the CSS class name 'myclass' is "*.myclass" and the selector for the elements with the id 'myid' is "*#myid". Read more about CSS selectors <a href="http://www.w3schools.com/cssref/css_selectors.asp" target="_blank">here</a>.
-         * @param mixed $selectors CSS selectors used to identify HTML elements.
+         * @param mixed $selectors CSS selectors used to identify HTML elements, comma separated.
          * @return HtmlToPdfClient Reference to the current object.
          */
         public function setPdfHideElements($selectors)
@@ -1389,6 +2066,19 @@ namespace SelectPdf\Api {
         public function setPdfShowOnlyElementID($elementID)
         {
             $this->parameters["pdf_show_only_element_id"] = $elementID;
+            return $this;
+        }
+
+        /**
+         * Get the locations of page elements from the conversion. The elements that will be excluded are defined using CSS selectors. 
+         * For example, the selector for all the H1 elements is "H1", the selector for all the elements with the CSS class name 'myclass' is "*.myclass" and the selector for the elements with the id 'myid' is "*#myid". 
+         * Read more about CSS selectors <a href="http://www.w3schools.com/cssref/css_selectors.asp" target="_blank">here</a>.
+         * @param mixed $selectors CSS selectors used to identify HTML elements, comma separated.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setPdfWebElementsSelectors($selectors)
+        {
+            $this->parameters["pdf_web_elements_selectors"] = $selectors;
             return $this;
         }
 
@@ -1451,6 +2141,941 @@ namespace SelectPdf\Api {
             return $this;
         }
 
+        /**
+         * Set HTTP cookies for the web page being converted.
+         * @param mixed $cookies Dictionary with HTTP cookies that will be sent to the page being converted.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setCookies($cookies)
+        {
+            $this->parameters["cookies_string"] = http_build_query($cookies);
+            return $this;
+        }
+
+        /**
+         * Set a custom parameter. Do not use this method unless advised by SelectPdf.
+         * @param mixed $parameterName Parameter name.
+         * @param mixed $parameterValue Parameter value.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setCustomParameter($parameterName, $parameterValue)
+        {
+            $this->parameters[$parameterName] = $parameterValue;
+            return $this;
+        }
+     
+        /**
+         * Get the locations of certain web elements. This is retrieved if pdf_web_elements_selectors parameter is set and elements were found to match the selectors.
+         * 
+         * @return Array with web elements locations.
+         */
+        public function getWebElements() {
+            $webElementsClient = new WebElementsClient($this->parameters["key"], $this->jobId);
+            $webElementsClient->setApiEndpoint($this->apiWebElementsEndpoint);
+    
+            return $webElementsClient->getWebElements();
+        }
     }
+
+    /**
+     * Pdf Merge with SelectPdf Online API.
+     */
+    class PdfMergeClient extends ApiClient {
+        private $fileIdx = 0;
+
+        /**
+         * Construct the Pdf Merge Client.
+         * @param mixed $apiKey API key.
+         */
+        public function __construct($apiKey)
+        {
+            $this->apiEndpoint = "https://selectpdf.com/api2/pdfmerge/";
+            $this->parameters["key"] = $apiKey;
+        }
+
+        /**
+         * Add local PDF document to the list of input files.
+         * @param mixed $inputPdf Path to a local PDF file.
+         * @param mixed $userPassword User password for the PDF document.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function addFile($inputPdf, $userPassword = '')
+        {
+            $this->fileIdx++;
+
+            $this->files["file_" . $this->fileIdx] = $inputPdf;
+            unset($this->parameters["url_" . $this->fileIdx]);
+            $this->parameters["password_" . $this->fileIdx] = $userPassword;
+
+            return $this;
+        }
+
+        /**
+         * Add remote PDF document to the list of input files.
+         * @param mixed $inputUrl Url of a remote PDF file.
+         * @param mixed $userPassword User password for the PDF document.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function addUrlFile($inputUrl, $userPassword = '')
+        {
+            $this->fileIdx++;
+
+            $this->parameters["url_" . $this->fileIdx] = $inputUrl;
+            $this->parameters["password_" . $this->fileIdx] = $userPassword;
+
+            return $this;
+        }
+
+        /**
+         * Merge all specified input pdfs and return the resulted PDF.
+         * @throws ApiException
+         * @return string String containing the resulted PDF.
+         */
+        public function save()
+        {
+            $this->parameters["async"] = "False";
+            $this->parameters["files_no"] = $this->fileIdx;
+
+            $result = $this->performPostAsMultipartFormData(null);
+
+            $this->fileIdx = 0;
+            $this->files = array();
+
+            return $result;
+        }
+
+        /**
+         * Merge all specified input pdfs and writes the resulted PDF to a local file.
+         * @param mixed $filePath Local file including path if necessary.
+         * @throws ApiException
+         */
+        public function saveToFile($filePath)
+        {
+            $result = $this->save();
+            file_put_contents($filePath, $result);
+        }
+
+        /**
+         * Merge all specified input pdfs and writes the resulted PDF to a specified stream.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function saveToStream($stream)
+        {
+            $result = $this->save();
+            fwrite($stream, $result);
+        }
+
+        /**
+         * Merge all specified input pdfs and return the resulted PDF. An asynchronous call is used.
+         * @throws ApiException
+         * @return string String containing the resulted PDF.
+         */
+        public function saveAsync()
+        {
+            $this->parameters["files_no"] = $this->fileIdx;
+
+            $JobID = $this->startAsyncJobMultipartFormData();
+
+            if ($JobID == null || $JobID === '')
+            {
+                throw new ApiException("An error occurred launching the asynchronous call.");
+            }
+
+            $noPings = 0;
+
+            do
+            {
+                $noPings++;
+
+                // sleep for a few seconds before next ping
+                sleep($this->AsyncCallsPingInterval);
+
+                $asyncJobClient = new AsyncJobClient($this->parameters["key"], $JobID);
+                $asyncJobClient->setApiEndpoint($this->apiAsyncEndpoint);
+
+                $result = $asyncJobClient->getResult();
+
+                if ($asyncJobClient->finished())
+                {
+                    $this->numberOfPages = $asyncJobClient->getNumberOfPages();
+                    $this->fileIdx = 0;
+                    $this->files = array();
+        
+                    return $result;
+                }
+
+            } while ($noPings <= $this->AsyncCallsMaxPings);
+
+            $this->fileIdx = 0;
+            $this->files = array();
+
+            throw new ApiException("Asynchronous call did not finish in expected timeframe.");
+        }
+
+        /**
+         * Merge all specified input pdfs and writes the resulted PDF to a local file. An asynchronous call is used.
+         * @param mixed $filePath Local file including path if necessary.
+         * @throws ApiException
+         */
+        public function saveToFileAsync($filePath)
+        {
+            $result = $this->saveAsync();
+            file_put_contents($filePath, $result);
+        }
+
+        /**
+         * Merge all specified input pdfs and writes the resulted PDF to a specified stream. An asynchronous call is used.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function saveToStreamAsync($stream)
+        {
+            $result = $this->saveAsync();
+            fwrite($stream, $result);
+        }
+
+        /**
+         * Set the PDF document title.
+         * @param mixed $docTitle Document title.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setDocTitle($docTitle)
+        {
+            $this->parameters["doc_title"] = $docTitle;
+            return $this;
+        }
+
+        /**
+         * Set the subject of the PDF document.
+         * @param mixed $docSubject Document subject.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setDocSubject($docSubject)
+        {
+            $this->parameters["doc_subject"] = $docSubject;
+            return $this;
+        }
+
+        /**
+         * Set the PDF document keywords.
+         * @param mixed $docKeywords Document keywords.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setDocKeywords($docKeywords)
+        {
+            $this->parameters["doc_keywords"] = $docKeywords;
+            return $this;
+        }
+
+        /**
+         * Set the name of the PDF document author.
+         * @param mixed $docAuthor Document author.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setDocAuthor($docAuthor)
+        {
+            $this->parameters["doc_author"] = $docAuthor;
+            return $this;
+        }
+
+        /**
+         * Add the date and time when the PDF document was created to the PDF document information. The default value is False.
+         * @param mixed $docAddCreationDate Add creation date to the document metadata or not.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setDocAddCreationDate($docAddCreationDate)
+        {
+            $this->parameters["doc_add_creation_date"] = $this->serializeBoolean($docAddCreationDate);
+            return $this;
+        }
+
+        /**
+         * Set the page layout to be used when the document is opened in a PDF viewer. The default value is 1 - OneColumn.
+         * @param mixed $pageLayout Page layout. Possible values: 0 (Single Page), 1 (One Column), 2 (Two Column Left), 3 (Two Column Right). Use constants from \SelectPdf\Api\PageLayout class.
+         * @throws ApiException
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setViewerPageLayout($pageLayout)
+        {
+            if ($pageLayout != 0 && $pageLayout != 1 && $pageLayout != 2 && $pageLayout != 3)
+                throw new ApiException("Allowed values for Page Layout: 0 (Single Page), 1 (One Column), 2 (Two Column Left), 3 (Two Column Right).");
+
+            $this->parameters["viewer_page_layout"] = $pageLayout;
+            return $this;
+        }
+
+        /**
+         * Set the document page mode when the pdf document is opened in a PDF viewer. The default value is 0 - UseNone.
+         * @param mixed $pageMode Page mode. Possible values: 0 (Use None), 1 (Use Outlines), 2 (Use Thumbs), 3 (Full Screen), 4 (Use OC), 5 (Use Attachments). Use constants from \SelectPdf\Api\PageMode class.
+         * @throws ApiException
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setViewerPageMode($pageMode)
+        {
+            if ($pageMode != 0 && $pageMode != 1 && $pageMode != 2 && $pageMode != 3 && $pageMode != 4 && $pageMode != 5)
+                throw new ApiException("Allowed values for Page Mode: 0 (Use None), 1 (Use Outlines), 2 (Use Thumbs), 3 (Full Screen), 4 (Use OC), 5 (Use Attachments).");
+
+            $this->parameters["viewer_page_mode"] = $pageMode;
+            return $this;
+        }
+
+        /**
+         * Set a flag specifying whether to position the document's window in the center of the screen. The default value is False.
+         * @param mixed $viewerCenterWindow Center window or not.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setViewerCenterWindow($viewerCenterWindow)
+        {
+            $this->parameters["viewer_center_window"] = $this->serializeBoolean($viewerCenterWindow);
+            return $this;
+        }
+
+        /**
+         * Set a flag specifying whether the window's title bar should display the document title taken from document information. The default value is False.
+         * @param mixed $viewerDisplayDocTitle Display title or not.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setViewerDisplayDocTitle($viewerDisplayDocTitle)
+        {
+            $this->parameters["viewer_display_doc_title"] = $this->serializeBoolean($viewerDisplayDocTitle);
+            return $this;
+        }
+
+        /**
+         * Set a flag specifying whether to resize the document's window to fit the size of the first displayed page. The default value is False.
+         * @param mixed $viewerFitWindow Fit window or not.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setViewerFitWindow($viewerFitWindow)
+        {
+            $this->parameters["viewer_fit_window"] = $this->serializeBoolean($viewerFitWindow);
+            return $this;
+        }
+
+        /**
+         * Set a flag specifying whether to hide the pdf viewer application's menu bar when the document is active. The default value is False.
+         * @param mixed $viewerHideMenuBar Hide menu bar or not.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setViewerHideMenuBar($viewerHideMenuBar)
+        {
+            $this->parameters["viewer_hide_menu_bar"] = $this->serializeBoolean($viewerHideMenuBar);
+            return $this;
+        }
+
+        /**
+         * Set a flag specifying whether to hide the pdf viewer application's tool bars when the document is active. The default value is False.
+         * @param mixed $viewerHideToolbar Hide tool bars or not.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setViewerHideToolbar($viewerHideToolbar)
+        {
+            $this->parameters["viewer_hide_toolbar"] = $this->serializeBoolean($viewerHideToolbar);
+            return $this;
+        }
+
+        /**
+         * Set a flag specifying whether to hide user interface elements in the document's window (such as scroll bars and navigation controls), leaving only the document's contents displayed.
+         * @param mixed $viewerHideWindowUI Hide window UI or not.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setViewerHideWindowUI($viewerHideWindowUI)
+        {
+            $this->parameters["viewer_hide_window_ui"] = $this->serializeBoolean($viewerHideWindowUI);
+            return $this;
+        }
+
+        /**
+         * Set PDF user password.
+         * @param mixed $userPassword PDF user password.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setUserPassword($userPassword)
+        {
+            $this->parameters["user_password"] = $userPassword;
+            return $this;
+        }
+
+        /**
+         * Set PDF owner password.
+         * @param mixed $ownerPassword PDF owner password.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setOwnerPassword($ownerPassword)
+        {
+            $this->parameters["owner_password"] = $ownerPassword;
+            return $this;
+        }
+
+        /**
+         * Set a custom parameter. Do not use this method unless advised by SelectPdf.
+         * @param mixed $parameterName Parameter name.
+         * @param mixed $parameterValue Parameter value.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setCustomParameter($parameterName, $parameterValue)
+        {
+            $this->parameters[$parameterName] = $parameterValue;
+            return $this;
+        }
+
+        /**
+         * Set the maximum amount of time (in seconds) for this job. The default value is 30 seconds. 
+         * Use a larger value (up to 120 seconds allowed) for pages that take a long time to load.
+         * @param mixed $timeout Timeout in seconds.
+         * @return PdfMergeClient Reference to the current object.
+         */
+        public function setTimeout($timeout)
+        {
+            $this->parameters["timeout"] = $timeout;
+            return $this;
+        }
+
+    }
+
+    /**
+     * Pdf To Text Conversion with SelectPdf Online API.
+     */
+    class PdfToTextClient extends ApiClient {
+        /**
+         * Construct the Pdf To Text Client.
+         * @param mixed $apiKey API key.
+         */
+        public function __construct($apiKey)
+        {
+            $this->apiEndpoint = "https://selectpdf.com/api2/pdftotext/";
+            $this->parameters["key"] = $apiKey;
+        }
+
+        /**
+         * Get the text from the specified pdf.
+         * @param mixed $inputPdf Path to a local PDF file.
+         * @throws ApiException
+         * @return string Extracted text.
+         */
+        public function getTextFromFile($inputPdf)
+        {
+            $this->parameters["async"] = "False";
+            $this->parameters["action"] = "Convert";
+            $this->parameters["url"] = "";
+
+            $this->files = array();
+            $this->files["inputPdf"] = $inputPdf;
+
+            $result = $this->performPostAsMultipartFormData(null);
+            return $result;
+        }
+
+        /**
+         * Get the text from the specified pdf and write it to the specified text file.
+         * @param mixed $inputPdf Path to a local PDF file.
+         * @param mixed $outputFilePath The output file where the resulted text will be written.
+         * @throws ApiException
+         */
+        public function getTextFromFileToFile($inputPdf, $outputFilePath)
+        {
+            $result = $this->getTextFromFile($inputPdf);
+            file_put_contents($outputFilePath, $result);
+        }
+
+        /**
+         * Get the text from the specified pdf and write it to the specified stream.
+         * @param mixed $inputPdf Path to a local PDF file.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function getTextFromFileToStream($inputPdf, $stream)
+        {
+            $result = $this->getTextFromFile($inputPdf);
+            fwrite($stream, $result);
+        }
+
+        /**
+         * Get the text from the specified pdf with an asynchronous call.
+         * @param mixed $inputPdf Path to a local PDF file.
+         * @throws ApiException
+         * @return string Extracted text.
+         */
+        public function getTextFromFileAsync($inputPdf)
+        {
+            $this->parameters["action"] = "Convert";
+            $this->parameters["url"] = "";
+
+            $this->files = array();
+            $this->files["inputPdf"] = $inputPdf;
+
+            $JobID = $this->startAsyncJobMultipartFormData();
+
+            if ($JobID == null || $JobID === '')
+            {
+                throw new ApiException("An error occurred launching the asynchronous call.");
+            }
+
+            $noPings = 0;
+
+            do
+            {
+                $noPings++;
+
+                // sleep for a few seconds before next ping
+                sleep($this->AsyncCallsPingInterval);
+
+                $asyncJobClient = new AsyncJobClient($this->parameters["key"], $JobID);
+                $asyncJobClient->setApiEndpoint($this->apiAsyncEndpoint);
+
+                $result = $asyncJobClient->getResult();
+
+                if ($asyncJobClient->finished())
+                {
+                    $this->numberOfPages = $asyncJobClient->getNumberOfPages();
+        
+                    return $result;
+                }
+
+            } while ($noPings <= $this->AsyncCallsMaxPings);
+
+            throw new ApiException("Asynchronous call did not finish in expected timeframe.");
+        }
+
+        /**
+         * Get the text from the specified pdf with an asynchronous call and write it to the specified text file.
+         * @param mixed $inputPdf Path to a local PDF file.
+         * @param mixed $outputFilePath The output file where the resulted text will be written.
+         * @throws ApiException
+         */
+        public function getTextFromFileToFileAsync($inputPdf, $outputFilePath)
+        {
+            $result = $this->getTextFromFileAsync($inputPdf);
+            file_put_contents($outputFilePath, $result);
+        }
+
+        /**
+         * Get the text from the specified pdf with an asynchronous call and write it to the specified stream.
+         * @param mixed $inputPdf Path to a local PDF file.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function getTextFromFileToStreamAsync($inputPdf, $stream)
+        {
+            $result = $this->getTextFromFileAsync($inputPdf);
+            fwrite($stream, $result);
+        }
+
+        /**
+         * Get the text from the specified pdf.
+         * @param mixed $url Address of the PDF file.
+         * @throws ApiException
+         * @return string Extracted text.
+         */
+        public function getTextFromUrl($url)
+        {
+            if (strncasecmp($url, "http://", 7) != 0 && strncasecmp($url, "https://", 8) != 0) {
+                throw new ApiException("The supported protocols for the converted webpage are http:// and https://.");
+            }
+            if (strncasecmp($url, "http://localhost", 16) === 0) {
+                throw new ApiException("Cannot convert local urls. SelectPdf online API can only convert publicly available urls.");
+            }
+
+            $this->parameters["async"] = "False";
+            $this->parameters["action"] = "Convert";
+
+            $this->files = array();
+            $this->parameters["url"] = $url;
+
+            $result = $this->performPostAsMultipartFormData(null);
+            return $result;
+        }
+
+        /**
+         * Get the text from the specified pdf and write it to the specified text file.
+         * @param mixed $url Address of the PDF file.
+         * @param mixed $outputFilePath The output file where the resulted text will be written.
+         * @throws ApiException
+         */
+        public function getTextFromUrlToFile($url, $outputFilePath)
+        {
+            $result = $this->getTextFromUrl($url);
+            file_put_contents($outputFilePath, $result);
+        }
+
+        /**
+         * Get the text from the specified pdf and write it to the specified stream.
+         * @param mixed $url Address of the PDF file.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function getTextFromUrlToStream($url, $stream)
+        {
+            $result = $this->getTextFromUrl($url);
+            fwrite($stream, $result);
+        }
+
+        /**
+         * Get the text from the specified pdf with an asynchronous call.
+         * @param mixed $url Address of the PDF file.
+         * @throws ApiException
+         * @return string Extracted text.
+         */
+        public function getTextFromUrlAsync($url)
+        {
+            if (strncasecmp($url, "http://", 7) != 0 && strncasecmp($url, "https://", 8) != 0) {
+                throw new ApiException("The supported protocols for the converted webpage are http:// and https://.");
+            }
+            if (strncasecmp($url, "http://localhost", 16) === 0) {
+                throw new ApiException("Cannot convert local urls. SelectPdf online API can only convert publicly available urls.");
+            }
+
+            $this->parameters["action"] = "Convert";
+
+            $this->files = array();
+            $this->parameters["url"] = $url;
+
+            $JobID = $this->startAsyncJobMultipartFormData();
+
+            if ($JobID == null || $JobID === '')
+            {
+                throw new ApiException("An error occurred launching the asynchronous call.");
+            }
+
+            $noPings = 0;
+
+            do
+            {
+                $noPings++;
+
+                // sleep for a few seconds before next ping
+                sleep($this->AsyncCallsPingInterval);
+
+                $asyncJobClient = new AsyncJobClient($this->parameters["key"], $JobID);
+                $asyncJobClient->setApiEndpoint($this->apiAsyncEndpoint);
+
+                $result = $asyncJobClient->getResult();
+
+                if ($asyncJobClient->finished())
+                {
+                    $this->numberOfPages = $asyncJobClient->getNumberOfPages();
+        
+                    return $result;
+                }
+
+            } while ($noPings <= $this->AsyncCallsMaxPings);
+
+            throw new ApiException("Asynchronous call did not finish in expected timeframe.");
+        }
+
+        /**
+         * Get the text from the specified pdf with an asynchronous call and write it to the specified text file.
+         * @param mixed $url Address of the PDF file.
+         * @param mixed $outputFilePath The output file where the resulted text will be written.
+         * @throws ApiException
+         */
+        public function getTextFromUrlToFileAsync($url, $outputFilePath)
+        {
+            $result = $this->getTextFromUrlAsync($url);
+            file_put_contents($outputFilePath, $result);
+        }
+
+        /**
+         * Get the text from the specified pdf with an asynchronous call and write it to the specified stream.
+         * @param mixed $url Address of the PDF file.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function getTextFromUrlToStreamAsync($url, $stream)
+        {
+            $result = $this->getTextFromUrlAsync($url);
+            fwrite($stream, $result);
+        }
+
+        /**
+         * Search for a specific text in a PDF document.
+         * Pages that participate to this operation are specified by setStartPage() and setEndPage() methods.
+         * @param mixed $inputPdf Path to a local PDF file.
+         * @param mixed $textToSearch Text to search.
+         * @param mixed $caseSensitive If the search is case sensitive or not.
+         * @param mixed $wholeWordsOnly If the search works on whole words or not.
+         * @throws ApiException
+         * @return List with text positions in the current PDF document.
+         */
+        public function searchFile($inputPdf, $textToSearch, $caseSensitive = false, $wholeWordsOnly = false)
+        {
+            $this->parameters["async"] = "False";
+            $this->parameters["action"] = "Search";
+            $this->parameters["url"] = "";
+            $this->parameters["search_text"] = $textToSearch;
+            $this->parameters["case_sensitive"] = $this->serializeBoolean($caseSensitive);
+            $this->parameters["whole_words_only"] = $this->serializeBoolean($wholeWordsOnly);
+
+            $this->files = array();
+            $this->files["inputPdf"] = $inputPdf;
+
+            $this->headers["Accept"] = "text/json";
+
+            $result = $this->performPostAsMultipartFormData(null);
+
+            if ($result) {
+                return json_decode($result, true);
+            }
+            else {
+                return array();
+            }
+        }
+
+        /**
+         * Search for a specific text in a PDF document with an asynchronous call.
+         * Pages that participate to this operation are specified by setStartPage() and setEndPage() methods.
+         * @param mixed $inputPdf Path to a local PDF file.
+         * @param mixed $textToSearch Text to search.
+         * @param mixed $caseSensitive If the search is case sensitive or not.
+         * @param mixed $wholeWordsOnly If the search works on whole words or not.
+         * @throws ApiException
+         * @return List with text positions in the current PDF document.
+         */
+        public function searchFileAsync($inputPdf, $textToSearch, $caseSensitive = false, $wholeWordsOnly = false)
+        {
+            $this->parameters["action"] = "Search";
+            $this->parameters["url"] = "";
+            $this->parameters["search_text"] = $textToSearch;
+            $this->parameters["case_sensitive"] = $this->serializeBoolean($caseSensitive);
+            $this->parameters["whole_words_only"] = $this->serializeBoolean($wholeWordsOnly);
+
+            $this->files = array();
+            $this->files["inputPdf"] = $inputPdf;
+
+            $this->headers["Accept"] = "text/json";
+
+            $JobID = $this->startAsyncJobMultipartFormData();
+
+            if ($JobID == null || $JobID === '')
+            {
+                throw new ApiException("An error occurred launching the asynchronous call.");
+            }
+
+            $noPings = 0;
+
+            do
+            {
+                $noPings++;
+
+                // sleep for a few seconds before next ping
+                sleep($this->AsyncCallsPingInterval);
+
+                $asyncJobClient = new AsyncJobClient($this->parameters["key"], $JobID);
+                $asyncJobClient->setApiEndpoint($this->apiAsyncEndpoint);
+
+                $result = $asyncJobClient->getResult();
+
+                if ($asyncJobClient->finished())
+                {
+                    $this->numberOfPages = $asyncJobClient->getNumberOfPages();
+        
+                    if ($result) {
+                        return json_decode($result, true);
+                    }
+                    else {
+                        return array();
+                    }
+                        }
+
+            } while ($noPings <= $this->AsyncCallsMaxPings);
+
+            throw new ApiException("Asynchronous call did not finish in expected timeframe.");
+        }
+
+        /**
+         * Search for a specific text in a PDF document.
+         * Pages that participate to this operation are specified by setStartPage() and setEndPage() methods.
+         * @param mixed $url Address of the PDF file.
+         * @param mixed $textToSearch Text to search.
+         * @param mixed $caseSensitive If the search is case sensitive or not.
+         * @param mixed $wholeWordsOnly If the search works on whole words or not.
+         * @throws ApiException
+         * @return List with text positions in the current PDF document.
+         */
+        public function searchUrl($url, $textToSearch, $caseSensitive = false, $wholeWordsOnly = false)
+        {
+            if (strncasecmp($url, "http://", 7) != 0 && strncasecmp($url, "https://", 8) != 0) {
+                throw new ApiException("The supported protocols for the converted webpage are http:// and https://.");
+            }
+            if (strncasecmp($url, "http://localhost", 16) === 0) {
+                throw new ApiException("Cannot convert local urls. SelectPdf online API can only convert publicly available urls.");
+            }
+
+            $this->parameters["async"] = "False";
+            $this->parameters["action"] = "Search";
+            $this->parameters["search_text"] = $textToSearch;
+            $this->parameters["case_sensitive"] = $this->serializeBoolean($caseSensitive);
+            $this->parameters["whole_words_only"] = $this->serializeBoolean($wholeWordsOnly);
+
+            $this->files = array();
+            $this->parameters["url"] = $url;
+
+            $this->headers["Accept"] = "text/json";
+
+            $result = $this->performPostAsMultipartFormData(null);
+
+            if ($result) {
+                return json_decode($result, true);
+            }
+            else {
+                return array();
+            }
+        }
+
+        /**
+         * Search for a specific text in a PDF document with an asynchronous call.
+         * Pages that participate to this operation are specified by setStartPage() and setEndPage() methods.
+         * @param mixed $url Address of the PDF file.
+         * @param mixed $textToSearch Text to search.
+         * @param mixed $caseSensitive If the search is case sensitive or not.
+         * @param mixed $wholeWordsOnly If the search works on whole words or not.
+         * @throws ApiException
+         * @return List with text positions in the current PDF document.
+         */
+        public function searchUrlAsync($url, $textToSearch, $caseSensitive = false, $wholeWordsOnly = false)
+        {
+            if (strncasecmp($url, "http://", 7) != 0 && strncasecmp($url, "https://", 8) != 0) {
+                throw new ApiException("The supported protocols for the converted webpage are http:// and https://.");
+            }
+            if (strncasecmp($url, "http://localhost", 16) === 0) {
+                throw new ApiException("Cannot convert local urls. SelectPdf online API can only convert publicly available urls.");
+            }
+
+            $this->parameters["action"] = "Search";
+            $this->parameters["search_text"] = $textToSearch;
+            $this->parameters["case_sensitive"] = $this->serializeBoolean($caseSensitive);
+            $this->parameters["whole_words_only"] = $this->serializeBoolean($wholeWordsOnly);
+
+            $this->files = array();
+            $this->parameters["url"] = $url;
+
+            $this->headers["Accept"] = "text/json";
+
+            $JobID = $this->startAsyncJobMultipartFormData();
+
+            if ($JobID == null || $JobID === '')
+            {
+                throw new ApiException("An error occurred launching the asynchronous call.");
+            }
+
+            $noPings = 0;
+
+            do
+            {
+                $noPings++;
+
+                // sleep for a few seconds before next ping
+                sleep($this->AsyncCallsPingInterval);
+
+                $asyncJobClient = new AsyncJobClient($this->parameters["key"], $JobID);
+                $asyncJobClient->setApiEndpoint($this->apiAsyncEndpoint);
+
+                $result = $asyncJobClient->getResult();
+
+                if ($asyncJobClient->finished())
+                {
+                    $this->numberOfPages = $asyncJobClient->getNumberOfPages();
+        
+                    if ($result) {
+                        return json_decode($result, true);
+                    }
+                    else {
+                        return array();
+                    }
+                        }
+
+            } while ($noPings <= $this->AsyncCallsMaxPings);
+
+            throw new ApiException("Asynchronous call did not finish in expected timeframe.");
+        }
+
+        /**
+         * Set Start Page number. Default value is 1 (first page of the document).
+         * @param mixed $startPage Start page number (1-based).
+         * @return PdfToTextClient Reference to the current object.
+         */
+        public function setStartPage($startPage)
+        {
+            $this->parameters["start_page"] = $startPage;
+            return $this;
+        }
+
+        /**
+         * Set End Page number. Default value is 0 (process till the last page of the document).
+         * @param mixed $endPage End page number (1-based).
+         * @return PdfToTextClient Reference to the current object.
+         */
+        public function setEndPage($endPage)
+        {
+            $this->parameters["end_page"] = $endPage;
+            return $this;
+        }
+
+        /**
+         * Set PDF user password.
+         * @param mixed $userPassword PDF user password.
+         * @return PdfToTextClient Reference to the current object.
+         */
+        public function setUserPassword($userPassword)
+        {
+            $this->parameters["user_password"] = $userPassword;
+            return $this;
+        }
+
+        /**
+         * Set the text layout. The default value is 0 - Original.
+         * @param mixed $textLayout The text layout. Possible values: 0 (Original), 1 (Reading). Use constants from \SelectPdf\Api\TextLayout class.
+         * @return PdfToTextClient Reference to the current object.
+         */
+        public function setTextLayout($textLayout)
+        {
+            if ($textLayout != 0 && $textLayout != 1)
+                throw new ApiException("Allowed values for Text Layout: 0 (Original), 1 (Reading).");
+
+            $this->parameters["text_layout"] = $textLayout;
+            return $this;
+        }
+
+        /**
+         * Set the output format. The default value is 0 - Text.
+         * @param mixed $outputFormat The text layout. Possible values: 0 (Text), 1 (Html). Use constants from \SelectPdf\Api\OutputFormat class.
+         * @return PdfToTextClient Reference to the current object.
+         */
+        public function setOutputFormat($outputFormat)
+        {
+            if ($outputFormat != 0 && $outputFormat != 1)
+                throw new ApiException("Allowed values for Output Format: 0 (Text), 1 (Html).");
+
+            $this->parameters["output_format"] = $outputFormat;
+            return $this;
+        }
+
+        /**
+         * Set a custom parameter. Do not use this method unless advised by SelectPdf.
+         * @param mixed $parameterName Parameter name.
+         * @param mixed $parameterValue Parameter value.
+         * @return PdfToTextClient Reference to the current object.
+         */
+        public function setCustomParameter($parameterName, $parameterValue)
+        {
+            $this->parameters[$parameterName] = $parameterValue;
+            return $this;
+        }
+
+        /**
+         * Set the maximum amount of time (in seconds) for this job. The default value is 30 seconds. 
+         * Use a larger value (up to 120 seconds allowed) for pages that take a long time to load.
+         * @param mixed $timeout Timeout in seconds.
+         * @return PdfToTextClient Reference to the current object.
+         */
+        public function setTimeout($timeout)
+        {
+            $this->parameters["timeout"] = $timeout;
+            return $this;
+        }
+
+    }
+
 }
 ?>
