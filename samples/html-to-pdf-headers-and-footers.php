@@ -51,11 +51,21 @@ try {
 
     echo ("Finished! Number of pages: " . $client->getNumberOfPages() . ".\n");
 
-    // get API usage
-    $usageClient = new \SelectPdf\Api\UsageClient($apiKey);
-    $usage = $usageClient->getUsage(true);
-    echo("Conversions remained this month: " . $usage["available"] . ".\n");
+    // response telemetry
+    echo ("Mode: " . $client->getMode() . ", Execution: " . $client->getExecutionMode() . ".\n");
 
+    if (!$client->isDemoMode()) {
+        echo ("Credits remaining: " . $client->getCreditsRemaining() . " / " . $client->getCreditsTotal() . ".\n");
+
+        // get API usage (paid keys only - the demo endpoint has no usage account)
+        $usageClient = new \SelectPdf\Api\UsageClient($apiKey);
+        $usage = $usageClient->getUsage(true);
+        echo("Conversions remained this month: " . $usage["available"] . ".\n");
+    }
+}
+catch (SelectPdf\Api\DemoRateLimitException $ex) {
+    // reason is one of: per_ip, daily_cap, concurrency
+    echo ("Demo rate limit (" . $ex->getReason() . "). Retry after " . $ex->getRetryAfter() . "s. Upgrade: " . $ex->getUpgradeUrl() . "\n");
 }
 catch (Exception $ex) {
 	echo("An error occurred: " . $ex . ".\n");

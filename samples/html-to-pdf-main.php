@@ -10,6 +10,10 @@ echo ("This is SelectPdf-" . SelectPdf\Api\ApiClient::CLIENT_VERSION . ".\n");
 try {
     $client = new SelectPdf\Api\HtmlToPdfClient($apiKey);
 
+    // No API key yet? Pass null, "" or "demo" to use the keyless demo endpoint
+    // (output is watermarked, capped at 5 pages, Chromium engine only):
+    // $client = new SelectPdf\Api\HtmlToPdfClient();
+
     // set parameters - see full list at https://selectpdf.com/html-to-pdf-api/
     $client
         // main properties
@@ -17,9 +21,9 @@ try {
         ->setPageSize(SelectPdf\Api\PageSize::A4) // PDF page size
         ->setPageOrientation(SelectPdf\Api\PageOrientation::Portrait) // PDF page orientation
         ->setMargins(0) // PDF page margins
-        ->setRenderingEngine(SelectPdf\Api\RenderingEngine::WebKit) // rendering engine
+        ->setRenderingEngine(SelectPdf\Api\RenderingEngine::WebKit) // rendering engine (demo mode forces Chromium)
         ->setConversionDelay(1) // conversion delay
-        ->setNavigationTimeout(30) // navigation timeout 
+        ->setNavigationTimeout(30) // navigation timeout
         ->setShowPageNumbers(false) // page numbers
         ->setPageBreaksEnhancedAlgorithm(true) // enhanced page break algorithm
 
@@ -32,7 +36,7 @@ try {
         // ->setKeepImagesTogether(true) // keep images together
         // ->setScaleImages(true) // scale images to create smaller pdfs
         // ->setSinglePagePdf(true) // generate a single page PDF
-        // ->setUserPassword("password") // secure the PDF with a password
+        // ->setUserPassword("password") // secure the PDF with a password (paid keys only)
 
         // generate automatic bookmarks
 
@@ -41,7 +45,7 @@ try {
     ;
 
     echo ("Starting conversion ...\n");
-    
+
     // convert url to file
     $client->convertUrlToFile($url, $localFile);
 
@@ -56,11 +60,35 @@ try {
 
     echo ("Finished! Number of pages: " . $client->getNumberOfPages() . ".\n");
 
-    // get API usage
-    $usageClient = new \SelectPdf\Api\UsageClient($apiKey);
-    $usage = $usageClient->getUsage(true);
-    echo("Conversions remained this month: " . $usage["available"] . ".\n");
+    // response telemetry
+    echo ("Mode: " . $client->getMode() . ", Execution: " . $client->getExecutionMode() . ".\n");
 
+    if ($client->isDemoMode()) {
+        if ($client->wasClamped())
+            echo ("Demo clamped: " . implode(", ", $client->getClampedFields()) . ".\n");
+        if ($client->wasAnyFieldDropped())
+            echo ("Demo dropped: " . implode(", ", $client->getDroppedFields()) . ".\n");
+    }
+    else {
+        echo ("Credits remaining: " . $client->getCreditsRemaining() . " / " . $client->getCreditsTotal() . ".\n");
+
+        // get API usage (paid keys only - the demo endpoint has no usage account)
+        $usageClient = new \SelectPdf\Api\UsageClient($apiKey);
+        $usage = $usageClient->getUsage(false);
+        echo("Conversions remained this month: " . $usage["available"] . ".\n");
+    }
+}
+catch (SelectPdf\Api\DemoRateLimitException $ex) {
+    // reason is one of: per_ip, daily_cap, concurrency
+    echo ("Demo rate limit (" . $ex->getReason() . "). Retry after " . $ex->getRetryAfter() . "s. Upgrade: " . $ex->getUpgradeUrl() . "\n");
+}
+catch (SelectPdf\Api\DemoSafetyException $ex) {
+    // demo only converts public URLs - internal/private hosts are rejected
+    echo ("Demo safety guard rejected '" . $ex->getField() . "' (reason=" . $ex->getReason() . ").\n");
+}
+catch (SelectPdf\Api\DemoUnsupportedException $ex) {
+    // feature not available on the demo endpoint (e.g. setUserPassword)
+    echo ("Feature '" . $ex->getField() . "' not available in demo mode. Upgrade: " . $ex->getUpgradeUrl() . "\n");
 }
 catch (Exception $ex) {
 	echo("An error occurred: " . $ex . ".\n");

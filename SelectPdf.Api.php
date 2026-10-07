@@ -21,11 +21,207 @@ namespace SelectPdf\Api {
 	}
 
     /**
+     * Default upgrade URL used in demo-mode error messages.
+     */
+    class DemoConstants {
+        /**
+         * Pricing page where a demo user can get a paid API key.
+         */
+        const UpgradeUrl = "https://selectpdf.com/pricing/";
+    }
+
+    /**
+     * Thrown when the demo endpoint refuses a request because of a rate limit (HTTP 429 or 503).
+     *
+     * Inspect getReason() to distinguish:
+     * - per_ip - the source IP exceeded its hourly conversion budget
+     * - concurrency - too many demo conversions are running right now
+     * - daily_cap - the global demo budget for today has been reached
+     */
+    class DemoRateLimitException extends ApiException {
+        private $statusCode;
+        private $reason;
+        private $retryAfter;
+        private $upgradeUrl;
+        private $responseBody;
+
+        /**
+         * Constructor invoked by the client when the demo endpoint returns a rate-limit error.
+         * @param int $statusCode HTTP status code returned by the server (429 or 503).
+         * @param string $reason Machine-readable rate-limit reason.
+         * @param int $retryAfter Seconds to wait before retrying (from the Retry-After header). Zero if absent.
+         * @param string $upgradeUrl URL the user can visit to upgrade out of demo mode.
+         * @param string $responseBody The raw JSON body the server returned.
+         * @param \Exception $previous Previous exception, if any.
+         */
+        public function __construct($statusCode, $reason, $retryAfter, $upgradeUrl, $responseBody, $previous = null) {
+            $upgrade = ($upgradeUrl === null || $upgradeUrl === '') ? DemoConstants::UpgradeUrl : $upgradeUrl;
+            $ra = $retryAfter > 0 ? " Retry after {$retryAfter}s." : "";
+            $message = "Demo rate limit reached (reason=" . ($reason === null ? "?" : $reason) . ")." . $ra . " Upgrade at " . $upgrade . ".";
+
+            parent::__construct($message, (int)$statusCode, $previous);
+
+            $this->statusCode = (int)$statusCode;
+            $this->reason = $reason === null ? "" : $reason;
+            $this->retryAfter = (int)$retryAfter;
+            $this->upgradeUrl = $upgrade;
+            $this->responseBody = $responseBody;
+        }
+
+        /**
+         * HTTP status code returned by the server (429 or 503).
+         * @return int
+         */
+        public function getStatusCode() { return $this->statusCode; }
+
+        /**
+         * Machine-readable rate-limit reason: per_ip, concurrency, or daily_cap.
+         * @return string
+         */
+        public function getReason() { return $this->reason; }
+
+        /**
+         * Seconds the client should wait before retrying (parsed from Retry-After). Zero if absent.
+         * @return int
+         */
+        public function getRetryAfter() { return $this->retryAfter; }
+
+        /**
+         * URL the user can visit to upgrade out of demo mode.
+         * @return string
+         */
+        public function getUpgradeUrl() { return $this->upgradeUrl; }
+
+        /**
+         * The raw JSON body the server returned, for diagnostics / logging.
+         * @return string
+         */
+        public function getResponseBody() { return $this->responseBody; }
+    }
+
+    /**
+     * Thrown when the demo safety guard rejects a request because a URL field references a non-public host (HTTP 400).
+     *
+     * Inspect getField() for which parameter was rejected and getReason() for why.
+     */
+    class DemoSafetyException extends ApiException {
+        private $statusCode;
+        private $field;
+        private $reason;
+        private $responseBody;
+
+        /**
+         * Constructor invoked by the client when the demo safety guard rejects a URL field.
+         * @param int $statusCode HTTP status code returned by the server (400).
+         * @param string $field Which input field was rejected.
+         * @param string $reason Why the field was rejected.
+         * @param string $responseBody The raw JSON body the server returned.
+         * @param \Exception $previous Previous exception, if any.
+         */
+        public function __construct($statusCode, $field, $reason, $responseBody, $previous = null) {
+            $message = "Demo safety guard rejected " . ($field === null ? "?" : $field) . " (reason=" . ($reason === null ? "?" : $reason) . "). Demo conversions cannot fetch internal/private hosts.";
+
+            parent::__construct($message, (int)$statusCode, $previous);
+
+            $this->statusCode = (int)$statusCode;
+            $this->field = $field === null ? "" : $field;
+            $this->reason = $reason === null ? "" : $reason;
+            $this->responseBody = $responseBody;
+        }
+
+        /**
+         * HTTP status code returned by the server (400).
+         * @return int
+         */
+        public function getStatusCode() { return $this->statusCode; }
+
+        /**
+         * Which input field was rejected: url, html, base_url, header_url, footer_url.
+         * @return string
+         */
+        public function getField() { return $this->field; }
+
+        /**
+         * Why the field was rejected: blocked_host, private_ip, loopback, link_local, cgnat, metadata, multicast, bad_scheme, bad_url, inline_internal_ref:&lt;sub-reason&gt;.
+         * @return string
+         */
+        public function getReason() { return $this->reason; }
+
+        /**
+         * The raw JSON body the server returned, for diagnostics / logging.
+         * @return string
+         */
+        public function getResponseBody() { return $this->responseBody; }
+    }
+
+    /**
+     * Thrown when the caller tried to use a feature that demo mode doesn't support - most commonly PDF passwords (HTTP 400).
+     * For paid keys, this exception is never thrown.
+     */
+    class DemoUnsupportedException extends ApiException {
+        private $statusCode;
+        private $field;
+        private $upgradeUrl;
+        private $responseBody;
+
+        /**
+         * Construct the exception.
+         * @param int $statusCode HTTP status code returned by the server (400). Use 0 when the exception is raised by the local client guard before the request is sent.
+         * @param string $field Which feature is unsupported (e.g. user_password, owner_password, async).
+         * @param string $upgradeUrl URL the user can visit to upgrade out of demo mode.
+         * @param string $responseBody The raw JSON body the server returned. Null when raised by the local client guard.
+         * @param \Exception $previous Previous exception, if any.
+         */
+        public function __construct($statusCode, $field, $upgradeUrl = null, $responseBody = null, $previous = null) {
+            $upgrade = ($upgradeUrl === null || $upgradeUrl === '') ? DemoConstants::UpgradeUrl : $upgradeUrl;
+            $fieldName = $field === null ? "?" : $field;
+
+            if ((int)$statusCode === 0) {
+                $message = "Feature '" . $fieldName . "' is not available in demo mode. Construct HtmlToPdfClient with a paid API key, or upgrade at " . $upgrade . ".";
+            }
+            else {
+                $message = "Feature '" . $fieldName . "' is not available in demo mode. Upgrade at " . $upgrade . ".";
+            }
+
+            parent::__construct($message, (int)$statusCode, $previous);
+
+            $this->statusCode = (int)$statusCode;
+            $this->field = $field === null ? "" : $field;
+            $this->upgradeUrl = $upgrade;
+            $this->responseBody = $responseBody;
+        }
+
+        /**
+         * HTTP status code returned by the server (400). Zero if the exception was raised by the local client guard before the request was sent.
+         * @return int
+         */
+        public function getStatusCode() { return $this->statusCode; }
+
+        /**
+         * Which feature is unsupported: user_password, owner_password, async, pdf_web_elements_selectors.
+         * @return string
+         */
+        public function getField() { return $this->field; }
+
+        /**
+         * URL the user can visit to upgrade out of demo mode.
+         * @return string
+         */
+        public function getUpgradeUrl() { return $this->upgradeUrl; }
+
+        /**
+         * The raw JSON body the server returned, for diagnostics / logging. Null when raised by the local client guard.
+         * @return string|null
+         */
+        public function getResponseBody() { return $this->responseBody; }
+    }
+
+    /**
      * Base class for API clients. Do not use this directly.
      */
     class ApiClient
     {
-        public const CLIENT_VERSION = '1.4.0';
+        public const CLIENT_VERSION = '1.6.0';
         protected const MULTIPART_FORM_DATA_BOUNDARY = "------------SelectPdf_Api_Boundry_$";
         protected const NEW_LINE = "\r\n";
 
@@ -38,14 +234,14 @@ namespace SelectPdf\Api {
         /**
          * API endpoint for async jobs
          * @var mixed
-         * 
+         *
          */
         protected $apiAsyncEndpoint = "https://selectpdf.com/api2/asyncjob/";
 
         /**
          * API endpoint for web elements
          * @var mixed
-         * 
+         *
          */
         protected $apiWebElementsEndpoint = "https://selectpdf.com/api2/webelements/";
 
@@ -87,6 +283,28 @@ namespace SelectPdf\Api {
          * Last HTTP Code
          */
         protected $lastHTTPCode = 0;
+
+        /**
+         * Subscription monthly conversion limit, parsed from X-SelectPdf-Credits-Total.
+         * -1 indicates unlimited (Dedicated tier). Null when the header is absent.
+         */
+        protected $creditsTotal = null;
+
+        /**
+         * Conversions remaining in the current month, parsed from X-SelectPdf-Credits-Remaining.
+         * -1 for unlimited subscriptions. Null when the header is absent.
+         */
+        protected $creditsRemaining = null;
+
+        /**
+         * Endpoint mode of the most recent response, parsed from X-SelectPdf-Mode ("production" or "demo").
+         */
+        protected $mode = "";
+
+        /**
+         * Server-side execution path of the most recent response, parsed from X-SelectPdf-Execution ("in-process" or "worker").
+         */
+        protected $executionMode = "";
 
         /**
          * Ping interval in seconds for asynchronous calls. Default value is 3 seconds.
@@ -134,6 +352,42 @@ namespace SelectPdf\Api {
         }
 
         /**
+         * Subscription monthly conversion limit reported by the server (X-SelectPdf-Credits-Total).
+         * -1 = unlimited (Dedicated tier). Null = the most recent response did not include credit info (e.g. demo endpoint, error response).
+         * @return int|null Monthly conversion limit.
+         */
+        public function getCreditsTotal() {
+            return $this->creditsTotal;
+        }
+
+        /**
+         * Conversions remaining in the current month reported by the server (X-SelectPdf-Credits-Remaining).
+         * -1 = unlimited (Dedicated tier). Null = the most recent response did not include credit info.
+         * @return int|null Conversions remaining this month.
+         */
+        public function getCreditsRemaining() {
+            return $this->creditsRemaining;
+        }
+
+        /**
+         * Endpoint mode of the most recent response (X-SelectPdf-Mode): "production" or "demo".
+         * Empty when the response did not include the header (older server, or non-conversion endpoint).
+         * @return string Endpoint mode.
+         */
+        public function getMode() {
+            return $this->mode;
+        }
+
+        /**
+         * Server-side execution path of the most recent conversion (X-SelectPdf-Execution): "in-process" or "worker".
+         * Empty for endpoints that don't perform a conversion (e.g. usage, web elements).
+         * @return string Execution mode.
+         */
+        public function getExecutionMode() {
+            return $this->executionMode;
+        }
+
+        /**
          * Create a POST request.
          * @param mixed $outStream Output response to this stream, if specified.
          * @throws ApiException
@@ -143,73 +397,10 @@ namespace SelectPdf\Api {
         {
             $this->headers["selectpdf-api-client"] = "php-" . constant('PHP_VERSION') . "-" . ApiClient::CLIENT_VERSION;
 
-            //reset results
-            $this->numberOfPages = 0;
-            $this->jobId = "";
-            $this->lastHTTPCode = 0;
-  
             // build headers string
             $allheaders = "Content-type: application/x-www-form-urlencoded\r\n";
 
-            foreach($this->headers as $headerKey => $headerValue) {
-                $allheaders = "$allheaders$headerKey: $headerValue\r\n";
-            }
-
-            //print_r($this->parameters);
-
-            // for options use key 'http' even if you send the request to https://...
-            $options = array(
-                'http' => array(
-                    'header'  => $allheaders,
-                    'method'  => 'POST',
-                    'content' => http_build_query($this->parameters),
-                    'ignore_errors' => true,
-                    'timeout' => 600 // timeout in seconds 600s=10minutes
-                ),
-            );
-
-            $context  = stream_context_create($options);
-            $result = @file_get_contents($this->apiEndpoint, false, $context);
-
-            $code = 0;
-            $message = "";
-            if (isset($http_response_header)) {
-                $this->parseResponseHeaders($http_response_header, $code, $message);
-            }
-
-            $this->lastHTTPCode = $code;
-            if ($code === 0) {
-                $error = error_get_last();
-                $message = $error['message'];
-            }
-
-            if ($code === 200) {
-                // all ok - return pdf or write to stream
-                if ($outStream == null)
-                    return $result;
-
-                $written = fwrite($outStream, $result);
-                if ($written != strlen($result)) {
-                    if (get_magic_quotes_runtime()) {
-                        throw new ApiException("Error writing the PDF file to the specified path. This happens because the 'magic_quotes_runtime' setting is enabled. Please disable it either in php.ini file or in code by calling 'set_magic_quotes_runtime(false)'.");
-                    }
-                    throw new ApiException('Error writing the PDF file to the specified path.');
-                }
-            }
-            else if ($code === 202) {
-                // request accepted (for asynchronous jobs)
-                // jobId should have been filled in parseResponseHeaders above
-                return null;
-            }
-            else {
-                // not ok - throw exception
-                if ($result) {
-                    $message = $result;
-                }
-                throw new ApiException($message, $code);
-            }
-
-
+            return $this->executePost($allheaders, http_build_query($this->parameters), $outStream);
         }
 
         /**
@@ -222,31 +413,44 @@ namespace SelectPdf\Api {
         {
             $this->headers["selectpdf-api-client"] = "php-" . constant('PHP_VERSION') . "-" . ApiClient::CLIENT_VERSION;
 
-            //reset results
-            $this->numberOfPages = 0;
-            $this->jobId = "";
-            $this->lastHTTPCode = 0;
-    
             // serialize parameters
             $byteData = $this->encodeMultipartFormData();
 
             // build headers string
             $allheaders = "Content-Type: multipart/form-data; boundary=" . self::MULTIPART_FORM_DATA_BOUNDARY . "\r\nContent-Length: " . strlen($byteData) . "\r\n";
 
+            return $this->executePost($allheaders, $byteData, $outStream);
+        }
+
+        /**
+         * Send the POST request and process the response.
+         * @param string $allheaders Content headers of the request.
+         * @param string $content Request body.
+         * @param mixed $outStream Output response to this stream, if specified.
+         * @throws ApiException
+         * @return string If output stream is not specified, return response as string.
+         */
+        private function executePost($allheaders, $content, $outStream)
+        {
+            //reset results
+            $this->numberOfPages = 0;
+            $this->jobId = "";
+            $this->lastHTTPCode = 0;
+            $this->creditsTotal = null;
+            $this->creditsRemaining = null;
+            $this->mode = "";
+            $this->executionMode = "";
+
             foreach($this->headers as $headerKey => $headerValue) {
                 $allheaders = "$allheaders$headerKey: $headerValue\r\n";
             }
-
-            //print_r($this->parameters);
-            //echo($allheaders);
-            //echo($byteData);
 
             // for options use key 'http' even if you send the request to https://...
             $options = array(
                 'http' => array(
                     'header'  => $allheaders,
                     'method'  => 'POST',
-                    'content' => $byteData,
+                    'content' => $content,
                     'ignore_errors' => true,
                     'timeout' => 600 // timeout in seconds 600s=10minutes
                 ),
@@ -255,34 +459,52 @@ namespace SelectPdf\Api {
             $context  = stream_context_create($options);
             $result = @file_get_contents($this->apiEndpoint, false, $context);
 
+            $rawHeaders = array();
+            if (function_exists('http_get_last_response_headers')) {
+                $lastHeaders = http_get_last_response_headers();
+                if (is_array($lastHeaders)) {
+                    $rawHeaders = $lastHeaders;
+                }
+            }
+            else if (isset($http_response_header) && is_array($http_response_header)) {
+                $rawHeaders = $http_response_header;
+            }
+
             $code = 0;
             $message = "";
-            if (isset($http_response_header)) {
-                $this->parseResponseHeaders($http_response_header, $code, $message);
-            }
+            $responseHeaders = $this->parseResponseHeaders($rawHeaders, $code, $message);
 
             $this->lastHTTPCode = $code;
             if ($code === 0) {
                 $error = error_get_last();
-                $message = $error['message'];
+                $message = "Could not get a response from the API endpoint: " . $this->apiEndpoint . ".";
+                if (is_array($error) && isset($error['message'])) {
+                    $message .= " " . $error['message'];
+                }
             }
 
             if ($code === 200) {
+                $this->readStandardResponseHeaders($responseHeaders);
+                $this->onResponseHeadersReceived($responseHeaders);
+
                 // all ok - return pdf or write to stream
                 if ($outStream == null)
                     return $result;
 
                 $written = fwrite($outStream, $result);
                 if ($written != strlen($result)) {
-                    if (get_magic_quotes_runtime()) {
+                    if (function_exists('get_magic_quotes_runtime') && @get_magic_quotes_runtime()) {
                         throw new ApiException("Error writing the PDF file to the specified path. This happens because the 'magic_quotes_runtime' setting is enabled. Please disable it either in php.ini file or in code by calling 'set_magic_quotes_runtime(false)'.");
                     }
                     throw new ApiException('Error writing the PDF file to the specified path.');
                 }
+                return null;
             }
             else if ($code === 202) {
                 // request accepted (for asynchronous jobs)
-                // jobId should have been filled in parseResponseHeaders above
+                // jobId is filled from the response headers
+                $this->readStandardResponseHeaders($responseHeaders);
+                $this->onResponseHeadersReceived($responseHeaders);
                 return null;
             }
             else {
@@ -290,10 +512,32 @@ namespace SelectPdf\Api {
                 if ($result) {
                     $message = $result;
                 }
+
+                // The demo endpoint returns JSON error bodies for 400 / 413 / 429 / 503.
+                // Parse those into typed exceptions so callers can react programmatically.
+                $contentType = isset($responseHeaders["content-type"]) ? $responseHeaders["content-type"] : "";
+                if ($code !== 0 && stripos($contentType, "application/json") !== false) {
+                    $retryAfter = 0;
+                    if (isset($responseHeaders["retry-after"]) && is_numeric(trim($responseHeaders["retry-after"]))) {
+                        $retryAfter = intval(trim($responseHeaders["retry-after"]));
+                    }
+                    $demoEx = self::tryBuildDemoException($code, $result, $retryAfter);
+                    if ($demoEx !== null) {
+                        throw $demoEx;
+                    }
+                }
+
                 throw new ApiException($message, $code);
             }
+        }
 
-
+        /**
+         * Hook called after a successful response (200 or 202), with the response headers (lowercase names).
+         * Subclasses can override it to capture endpoint-specific headers. Default implementation is a no-op.
+         * @param array $headers Response headers, indexed by lowercase header name.
+         */
+        protected function onResponseHeadersReceived($headers)
+        {
         }
 
         /**
@@ -308,7 +552,7 @@ namespace SelectPdf\Api {
                 $allData .= self::NEW_LINE;
                 $allData .= $value . self::NEW_LINE;
             }
-    
+
             foreach ($this->files as $key => $value) {
                 $allData .= "--" . self::MULTIPART_FORM_DATA_BOUNDARY . self::NEW_LINE;
                 $allData .= 'Content-Disposition: form-data; name="' . $key . '";' . ' filename="' . $value . '"' . self::NEW_LINE;
@@ -317,7 +561,7 @@ namespace SelectPdf\Api {
                 $allData .= file_get_contents($value);
                 $allData .= self::NEW_LINE;
             }
-    
+
             foreach ($this->binaryData as $key => $value) {
                 $allData .= "--" . self::MULTIPART_FORM_DATA_BOUNDARY . self::NEW_LINE;
                 $allData .= 'Content-Disposition: form-data; name="' . $key . '";' . ' filename="' . $key . '"' . self::NEW_LINE;
@@ -326,13 +570,13 @@ namespace SelectPdf\Api {
                 $allData .= $value;
                 $allData .= self::NEW_LINE;
             }
-    
+
             return $allData . "--" . self::MULTIPART_FORM_DATA_BOUNDARY . "--". self::NEW_LINE . self::NEW_LINE;
         }
 
         /**
          * Start an asynchronous job.
-         * 
+         *
          * @return string Asynchronous job ID.
          */
         protected function startAsyncJob() {
@@ -343,7 +587,7 @@ namespace SelectPdf\Api {
 
         /**
          * Start an asynchronous job that requires multipart forma data.
-         * 
+         *
          * @return string Asynchronous job ID.
          */
         protected function startAsyncJobMultipartFormData() {
@@ -365,20 +609,115 @@ namespace SelectPdf\Api {
             return $serialized;
         }
 
+        /**
+         * Parse the raw response headers. Returns the headers of the final response (after any redirects), indexed by lowercase name.
+         */
         private function parseResponseHeaders($headers, &$code, &$message) {
-            //print_r($headers);
+            $parsed = array();
             if (!empty($headers)) {
                 foreach ($headers as $header) {
-                    if (preg_match('/HTTP\/\d\.\d\s+(\d+)\s*.*/', $header, $matches)) {
+                    if (preg_match('/^HTTP\/[\d.]+\s+(\d+)\s*.*/', $header, $matches)) {
+                        // a new response starts (redirects produce several header blocks) - keep only the last one
                         $code = intval($matches[1]);
                         $message = $matches[0];
-                    } else if(preg_match('/selectpdf-api-jobid:\s+(.*)/', $header, $matches)) {
-                        $this->jobId = $matches[1];
-                    } else if(preg_match('/selectpdf-api-pages:\s+(.*)/', $header, $matches)) {
-                        $this->numberOfPages = intval($matches[1]);
-                    }                
+                        $parsed = array();
+                    }
+                    else {
+                        $pos = strpos($header, ':');
+                        if ($pos !== false) {
+                            $name = strtolower(trim(substr($header, 0, $pos)));
+                            $value = trim(substr($header, $pos + 1));
+                            if (!isset($parsed[$name])) {
+                                $parsed[$name] = $value;
+                            }
+                        }
+                    }
                 }
             }
+            return $parsed;
+        }
+
+        /**
+         * Read the standard X-SelectPdf-* response headers: pages, job id, credits, mode, execution.
+         * @param array $headers Response headers, indexed by lowercase header name.
+         */
+        private function readStandardResponseHeaders($headers) {
+            if (isset($headers["x-selectpdf-pages"]) && is_numeric($headers["x-selectpdf-pages"])) {
+                $this->numberOfPages = intval($headers["x-selectpdf-pages"]);
+            }
+            else if (isset($headers["selectpdf-api-pages"]) && is_numeric($headers["selectpdf-api-pages"])) {
+                // older servers
+                $this->numberOfPages = intval($headers["selectpdf-api-pages"]);
+            }
+
+            if (isset($headers["x-selectpdf-job-id"]) && $headers["x-selectpdf-job-id"] !== '') {
+                $this->jobId = $headers["x-selectpdf-job-id"];
+            }
+            else if (isset($headers["selectpdf-api-jobid"]) && $headers["selectpdf-api-jobid"] !== '') {
+                // older servers
+                $this->jobId = $headers["selectpdf-api-jobid"];
+            }
+
+            if (isset($headers["x-selectpdf-credits-total"]) && preg_match('/^-?\d+$/', $headers["x-selectpdf-credits-total"])) {
+                $this->creditsTotal = intval($headers["x-selectpdf-credits-total"]);
+            }
+
+            if (isset($headers["x-selectpdf-credits-remaining"]) && preg_match('/^-?\d+$/', $headers["x-selectpdf-credits-remaining"])) {
+                $this->creditsRemaining = intval($headers["x-selectpdf-credits-remaining"]);
+            }
+
+            if (isset($headers["x-selectpdf-mode"]) && $headers["x-selectpdf-mode"] !== '') {
+                $this->mode = $headers["x-selectpdf-mode"];
+            }
+
+            if (isset($headers["x-selectpdf-execution"]) && $headers["x-selectpdf-execution"] !== '') {
+                $this->executionMode = $headers["x-selectpdf-execution"];
+            }
+        }
+
+        /**
+         * Build a typed demo exception from a JSON error body returned by the demo endpoint:
+         *   {"error":"rate_limited","reason":"per_ip","upgrade":"..."}
+         *   {"error":"unsafe_url","field":"url","reason":"private_ip"}
+         *   {"error":"unsupported_in_demo","field":"user_password","upgrade":"..."}
+         *   {"error":"body_too_large","max_bytes":1048576,"upgrade":"..."}
+         * @param int $statusCode HTTP status code.
+         * @param string $body Response body.
+         * @param int $retryAfter Value of the Retry-After header (seconds), 0 if absent.
+         * @return ApiException|null The typed exception, or null if the body is not a demo error.
+         */
+        protected static function tryBuildDemoException($statusCode, $body, $retryAfter) {
+            if ($body === null || $body === false || $body === '') return null;
+
+            $json = json_decode($body, true);
+            if (!is_array($json)) return null;
+
+            $error = self::jsonStringField($json, "error");
+            if ($error === null || $error === '') return null;
+
+            $reason = self::jsonStringField($json, "reason");
+            $field = self::jsonStringField($json, "field");
+            $upgrade = self::jsonStringField($json, "upgrade");
+
+            switch ($error) {
+                case "rate_limited":
+                    return new DemoRateLimitException($statusCode, $reason, $retryAfter, $upgrade, $body);
+                case "unsafe_url":
+                    return new DemoSafetyException($statusCode, $field, $reason, $body);
+                case "unsupported_in_demo":
+                    return new DemoUnsupportedException($statusCode, $field, $upgrade, $body);
+                case "body_too_large":
+                    return new ApiException("Demo request body exceeds the demo cap. Upgrade at " . (($upgrade === null || $upgrade === '') ? DemoConstants::UpgradeUrl : $upgrade) . ".", $statusCode);
+                default:
+                    return null;
+            }
+        }
+
+        private static function jsonStringField($json, $name) {
+            if (!array_key_exists($name, $json) || $json[$name] === null) return null;
+            if (is_bool($json[$name])) return $json[$name] ? "true" : "false";
+            if (is_scalar($json[$name])) return strval($json[$name]);
+            return null;
         }
 
     }
@@ -451,15 +790,15 @@ namespace SelectPdf\Api {
          * @return mixed True if job finished.
          */
         public function finished() {
-            // 200 OK - the job is finished (successfully). 
-            // 202 Accepted - the job is still running. 
+            // 200 OK - the job is finished (successfully).
+            // 202 Accepted - the job is still running.
             // 499 (or some other error code) - error - job is finished (with error).
             return $this->lastHTTPCode !== 202;
         }
     }
 
     /**
-     *  Get the locations of certain web elements. 
+     *  Get the locations of certain web elements.
      *  This is retrieved if pdf_web_elements_selectors parameter was set during the initial conversion call and elements were found to match the selectors.
      */
     class WebElementsClient extends ApiClient {
@@ -475,7 +814,7 @@ namespace SelectPdf\Api {
         }
 
         /**
-         * Get the locations of certain web elements. 
+         * Get the locations of certain web elements.
          * This is retrieved if pdf_web_elements_selectors parameter is set and elements were found to match the selectors.
          * @return mixed List of web elements locations.
          */
@@ -601,6 +940,11 @@ namespace SelectPdf\Api {
          * Blink rendering engine.
          */
         const Blink = "Blink";
+
+        /**
+         * Chromium rendering engine.
+         */
+        const Chromium = "Chromium";
 
     }
 
@@ -750,6 +1094,139 @@ namespace SelectPdf\Api {
     }
 
     /**
+     * PDF conformance target for the generated document.
+     *
+     * Tagged standards (PdfA3A) require the Blink or Chromium rendering engine.
+     * When no engine is specified the API promotes the request to Chromium and reports the engine used in the X-SelectPdf-Engine response header.
+     */
+    class PdfStandard {
+        /**
+         * The complete PDF feature set. Default.
+         */
+        const Full = "Full";
+
+        /**
+         * PDF/A - long term archiving.
+         */
+        const PdfA = "PdfA";
+
+        /**
+         * PDF/A-2B - long term archiving, transparencies allowed.
+         */
+        const PdfA2B = "PdfA2B";
+
+        /**
+         * PDF/A-3A - the accessible level of PDF/A-3. Implies a tagged document and can carry a ZUGFeRD / Factur-X electronic invoice.
+         */
+        const PdfA3A = "PdfA3A";
+
+        /**
+         * PDF/A-3B - long term archiving with arbitrary embedded files. Can carry a ZUGFeRD / Factur-X electronic invoice.
+         */
+        const PdfA3B = "PdfA3B";
+
+        /**
+         * PDF/A-3U - PDF/A-3B with Unicode mapping for all text. Can carry a ZUGFeRD / Factur-X electronic invoice.
+         */
+        const PdfA3U = "PdfA3U";
+
+        /**
+         * PDF/X - graphics exchange.
+         */
+        const PdfX = "PdfX";
+
+        /**
+         * PDF/SiqQ Level A - suitable for digital signatures, external links disabled.
+         */
+        const PdfSiqQ_A = "PdfSiqQ_A";
+
+        /**
+         * PDF/SiqQ Level B - suitable for digital signatures.
+         */
+        const PdfSiqQ_B = "PdfSiqQ_B";
+    }
+
+    /**
+     * The data profile of a ZUGFeRD / Factur-X hybrid electronic invoice.
+     * The profile determines how much of the EN 16931 semantic model the embedded XML carries.
+     */
+    class ZugferdProfile {
+        /**
+         * MINIMUM - accounting information only. Not a complete invoice.
+         */
+        const Minimum = "Minimum";
+
+        /**
+         * BASIC WL - header and footer data without invoice lines. Not a complete invoice.
+         */
+        const Basic_WL = "Basic_WL";
+
+        /**
+         * BASIC - a subset of EN 16931 covering simple invoices, with lines.
+         */
+        const Basic = "Basic";
+
+        /**
+         * EN 16931 (formerly COMFORT) - the full European semantic standard.
+         */
+        const En16931 = "En16931";
+
+        /**
+         * EXTENDED - EN 16931 plus additional business terms.
+         */
+        const Extended = "Extended";
+
+        /**
+         * XRECHNUNG - the German public-sector reference profile. The embedded file is named xrechnung.xml instead of factur-x.xml.
+         */
+        const XRechnung = "XRechnung";
+    }
+
+    /**
+     * How the embedded invoice XML relates to the visible invoice page.
+     *
+     * When not set, the API derives this from the profile: Alternative for Minimum and Basic_WL, Data for the rest.
+     * Minimum and Basic_WL combined with Data are rejected, because those profiles do not carry a complete invoice.
+     */
+    class ZugferdRelationship {
+        /**
+         * The XML and the visible page carry exactly the same invoice content.
+         * Mandatory in Germany for the Basic, En16931, Extended and XRechnung profiles.
+         */
+        const Data = "Data";
+
+        /**
+         * The visible page carries more than the XML does - always the case for the Minimum and Basic_WL profiles - or the page was generated from the XML.
+         */
+        const Alternative = "Alternative";
+
+        /**
+         * The XML is the source the visible page was produced from.
+         */
+        const Source = "Source";
+
+        /**
+         * The XML supplements the visible page.
+         */
+        const Supplement = "Supplement";
+    }
+
+    /**
+     * The metadata schema used to identify a hybrid invoice inside the PDF.
+     */
+    class ZugferdSchema {
+        /**
+         * Factur-X 1.0 / ZUGFeRD 2.x - the current schema. Default.
+         */
+        const FacturX10 = "FacturX10";
+
+        /**
+         * ZUGFeRD 2.0 - the legacy schema, deprecated but still accepted. Use only for recipients that explicitly require it.
+         */
+        const Zugferd20 = "Zugferd20";
+    }
+
+    /**
      * Html To Pdf Conversion with SelectPdf Online API.
      * 
      * ```php
@@ -813,16 +1290,141 @@ namespace SelectPdf\Api {
      *  }
      *  ?>
      * ```
+     *
+     * Pass null, an empty string or "demo" as the API key to use the keyless demo endpoint:
+     * no signup is required, but the output is watermarked, capped at 5 pages and rendered with the Chromium engine.
      */
     class HtmlToPdfClient extends ApiClient {
         /**
-         * Construct the Html To Pdf Client.
-         * @param mixed $apiKey API key.
+         * Production conversion endpoint.
          */
-        public function __construct($apiKey)
+        const ProductionEndpoint = "https://selectpdf.com/api2/convert/";
+
+        /**
+         * Keyless demo conversion endpoint.
+         */
+        const DemoEndpoint = "https://selectpdf.com/api2/convert/demo/";
+
+        /**
+         * True if the client was constructed for the keyless demo endpoint.
+         */
+        private $demoMode = false;
+
+        /**
+         * Names of the parameters the demo endpoint clamped on the most recent conversion.
+         */
+        private $clampedFields = array();
+
+        /**
+         * Names of the parameters the demo endpoint dropped on the most recent conversion.
+         */
+        private $droppedFields = array();
+
+        /**
+         * Construct the Html To Pdf Client.
+         *
+         * Pass a paid API key for production use. Pass null, an empty string, or "demo" (case-insensitive) to use the keyless demo endpoint -
+         * output is watermarked and capped at 5 pages, but no signup is required.
+         * @param mixed $apiKey API key. Defaults to null, which selects demo mode. Pass a real key for full unwatermarked output.
+         */
+        public function __construct($apiKey = null)
         {
-            $this->apiEndpoint = "https://selectpdf.com/api2/convert/";
-            $this->parameters["key"] = $apiKey;
+            $demo = ($apiKey === null || $apiKey === '' || strtolower(trim($apiKey)) === 'demo');
+
+            if ($demo) {
+                $this->apiEndpoint = self::DemoEndpoint;
+                $this->demoMode = true;
+                // Demo is keyless. The key parameter is not sent.
+            }
+            else {
+                $this->apiEndpoint = self::ProductionEndpoint;
+                $this->demoMode = false;
+                $this->parameters["key"] = $apiKey;
+            }
+        }
+
+        /**
+         * True if the client was constructed for the keyless demo endpoint (the API key was null, empty, or "demo").
+         * Set at construction time and stable for the lifetime of the client. Calling setApiEndpoint does not change it.
+         * @return bool Demo mode or not.
+         */
+        public function isDemoMode() {
+            return $this->demoMode;
+        }
+
+        /**
+         * True if the most recent response was tagged X-SelectPdf-Mode: demo (the request actually landed on a demo endpoint).
+         * @return bool Demo response or not.
+         */
+        public function isDemoResponse() {
+            return $this->mode !== null && strcasecmp($this->mode, "demo") === 0;
+        }
+
+        /**
+         * Names of the parameters the demo endpoint clamped on the most recent conversion (e.g. ["max_load_time", "engine"]).
+         * Empty array if nothing was clamped or for non-demo responses. "Clamped" means the value was modified (capped, force-set), not discarded.
+         * @return array List of clamped parameter names.
+         */
+        public function getClampedFields() {
+            return $this->clampedFields;
+        }
+
+        /**
+         * True if the most recent response had any clamped fields.
+         * @return bool Any field clamped or not.
+         */
+        public function wasClamped() {
+            return count($this->clampedFields) > 0;
+        }
+
+        /**
+         * Names of the parameters the demo endpoint silently dropped on the most recent conversion (e.g. ["auth_username", "cookies_string"]).
+         * The demo endpoint does not honor a small set of fields for safety reasons - auth credentials, cookies, raw parameters, pdf name, async, web elements selectors -
+         * and reports any caller-supplied value in the X-SelectPdf-Demo-Dropped response header. Empty array if nothing was dropped or for non-demo responses.
+         * Clamped = value modified, dropped = value thrown away.
+         * @return array List of dropped parameter names.
+         */
+        public function getDroppedFields() {
+            return $this->droppedFields;
+        }
+
+        /**
+         * True if the most recent response reported any dropped fields.
+         * @return bool Any field dropped or not.
+         */
+        public function wasAnyFieldDropped() {
+            return count($this->droppedFields) > 0;
+        }
+
+        /**
+         * Capture the demo-specific response headers (clamped and dropped fields).
+         * @param array $headers Response headers, indexed by lowercase header name.
+         */
+        protected function onResponseHeadersReceived($headers)
+        {
+            $this->clampedFields = self::splitFields(isset($headers["x-selectpdf-demo-clamped"]) ? $headers["x-selectpdf-demo-clamped"] : "");
+            $this->droppedFields = self::splitFields(isset($headers["x-selectpdf-demo-dropped"]) ? $headers["x-selectpdf-demo-dropped"] : "");
+        }
+
+        private static function splitFields($raw) {
+            if ($raw === null || $raw === '') return array();
+            $parts = explode(",", $raw);
+            $result = array();
+            foreach ($parts as $part) {
+                $result[] = trim($part);
+            }
+            return $result;
+        }
+
+        /**
+         * Throw DemoUnsupportedException if the client is in demo mode.
+         * @param string $field Name of the unsupported feature.
+         * @throws DemoUnsupportedException
+         */
+        protected function ensureNotDemo($field) {
+            if ($this->demoMode) {
+                throw new DemoUnsupportedException(0, $field);
+            }
         }
 
         /**
@@ -866,7 +1468,7 @@ namespace SelectPdf\Api {
             $this->parameters["base_url"] = "";
             $this->parameters["async"] = "False";
 
-            $this->performPost(stream);
+            $this->performPost($stream);
         }
 
         /**
@@ -906,12 +1508,16 @@ namespace SelectPdf\Api {
 
         /**
          * Convert the specified url to PDF using an asynchronous call. SelectPdf online API can convert http:// and https:// publicly available urls.
+         * Asynchronous calls are not available in demo mode (DemoUnsupportedException is thrown).
          * @param mixed $url Address of the web page being converted.
          * @throws ApiException
+         * @throws DemoUnsupportedException
          * @return string String containing the resulted PDF.
          */
         public function convertUrlAsync($url)
         {
+            $this->ensureNotDemo("async");
+
             if (strncasecmp($url, "http://", 7) != 0 && strncasecmp($url, "https://", 8) != 0) {
                 throw new ApiException("The supported protocols for the converted webpage are http:// and https://.");
             }
@@ -1056,12 +1662,17 @@ namespace SelectPdf\Api {
 
         /**
          * Convert the specified HTML string to PDF using an asynchronous call. Use a base url to resolve relative paths to resources.
+         * Asynchronous calls are not available in demo mode (DemoUnsupportedException is thrown).
          * @param mixed $htmlString HTML string with the content being converted.
          * @param mixed $baseUrl Base url used to resolve relative paths to resources (css, images, javascript, etc). Must be a http:// or https:// publicly available url.
+         * @throws ApiException
+         * @throws DemoUnsupportedException
          * @return string String containing the resulted PDF.
          */
         public function convertHtmlStringWithBaseUrlAsync($htmlString, $baseUrl)
         {
+            $this->ensureNotDemo("async");
+
             $this->parameters["html"] = $htmlString;
             $this->parameters["url"] = "";
 
@@ -1191,14 +1802,14 @@ namespace SelectPdf\Api {
 
         /**
          * Set PDF page size. Default value is A4. If page size is set to Custom, use setPageWidth and setPageHeight methods to set the custom width/height of the PDF pages.
-         * @param mixed $pageSize PDF page size. Possible values: Custom, A1, A2, A3, A4, A5, Letter, HalfLetter, Ledger, Legal. Use constants from {@see \SelectPdf\Api\PageSize} class.
+         * @param mixed $pageSize PDF page size. Possible values: Custom, A0, A1, A2, A3, A4, A5, A6, A7, A8, Letter, HalfLetter, Ledger, Legal. Use constants from {@see \SelectPdf\Api\PageSize} class.
          * @throws ApiException
          * @return HtmlToPdfClient Reference to the current object.
          */
         public function setPageSize($pageSize)
         {
-            if (!preg_match("/(?i)^(Custom|A1|A2|A3|A4|A5|Letter|HalfLetter|Ledger|Legal)$/", $pageSize))
-                throw new ApiException("Allowed values for Page Size: Custom, A1, A2, A3, A4, A5, Letter, HalfLetter, Ledger, Legal.");
+            if (!preg_match("/(?i)^(Custom|A0|A1|A2|A3|A4|A5|A6|A7|A8|Letter|HalfLetter|Ledger|Legal)$/", $pageSize))
+                throw new ApiException("Allowed values for Page Size: Custom, A0, A1, A2, A3, A4, A5, A6, A7, A8, Letter, HalfLetter, Ledger, Legal.");
 
             $this->parameters["page_size"] = $pageSize;
             return $this;
@@ -1310,36 +1921,90 @@ namespace SelectPdf\Api {
 
         /**
          * Set the rendering engine used for the HTML to PDF conversion. Default value is WebKit.
-         * @param mixed $renderingEngine HTML rendering engine. Use constants from \SelectPdf\Api\RenderingEngine class.
+         * @param mixed $renderingEngine HTML rendering engine. Possible values: WebKit, Restricted, Blink, Chromium. Use constants from \SelectPdf\Api\RenderingEngine class.
+         * @throws ApiException
          * @return HtmlToPdfClient Reference to the current object.
          */
         public function setRenderingEngine($renderingEngine)
         {
-            if (!preg_match("/(?i)^(WebKit|Restricted|Blink)$/", $renderingEngine))
-                throw new ApiException("Allowed values for Rendering Engine: WebKit, Restricted, Blink.");
+            if (!preg_match("/(?i)^(WebKit|Restricted|Blink|Chromium)$/", $renderingEngine))
+                throw new ApiException("Allowed values for Rendering Engine: WebKit, Restricted, Blink, Chromium.");
 
             $this->parameters["engine"] = $renderingEngine;
             return $this;
         }
 
         /**
-         * Set PDF user password.
+         * Produce a tagged, accessible PDF: a logical structure tree covering headings, paragraphs, lists, tables, figures with alternate text, links and reading order. Default is False.
+         *
+         * Requires the Blink or Chromium rendering engine - the WebKit engines cannot produce a structure tree.
+         * If no engine is set, the API promotes the request to Chromium and reports it in the X-SelectPdf-Engine response header.
+         * Setting an explicit WebKit engine together with tagged output is rejected by the API.
+         * A tagged document also needs a title, so set it with setDocTitle - the converter falls back to the HTML document title when it is not set.
+         * @param mixed $tagged Produce a tagged, accessible PDF or not.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setTagged($tagged)
+        {
+            $this->parameters["tagged"] = $this->serializeBoolean($tagged);
+            return $this;
+        }
+
+        /**
+         * Set the PDF conformance target - PDF/A for archiving, PDF/X for graphics exchange, PDF/SiqQ for digital signatures. Default is Full.
+         *
+         * PdfA3A is the accessible level of PDF/A-3: it implies a tagged document, so it carries the same rendering-engine requirement as setTagged.
+         * @param mixed $pdfStandard PDF conformance target. Possible values: Full, PdfA, PdfA2B, PdfA3A, PdfA3B, PdfA3U, PdfX, PdfSiqQ_A, PdfSiqQ_B. Use constants from \SelectPdf\Api\PdfStandard class.
+         * @throws ApiException
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setPdfStandard($pdfStandard)
+        {
+            if (!preg_match("/(?i)^(Full|PdfA|PdfA2B|PdfA3A|PdfA3B|PdfA3U|PdfX|PdfSiqQ_A|PdfSiqQ_B)$/", $pdfStandard))
+                throw new ApiException("Allowed values for Pdf Standard: Full, PdfA, PdfA2B, PdfA3A, PdfA3B, PdfA3U, PdfX, PdfSiqQ_A, PdfSiqQ_B.");
+
+            $this->parameters["pdf_standard"] = $pdfStandard;
+            return $this;
+        }
+
+        /**
+         * Set the natural language of the document, for example "en-US" or "de-DE".
+         * Written as the PDF /Lang entry and onto tagged structure elements. Default is "en-US".
+         * @param mixed $documentLanguage Language tag, for example "en-US".
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setDocumentLanguage($documentLanguage)
+        {
+            $this->parameters["doc_language"] = $documentLanguage;
+            return $this;
+        }
+
+        /**
+         * Set PDF user password. Not available in demo mode (DemoUnsupportedException is thrown).
          * @param mixed $userPassword PDF user password.
+         * @throws DemoUnsupportedException
          * @return HtmlToPdfClient Reference to the current object.
          */
         public function setUserPassword($userPassword)
         {
+            if ($this->demoMode && $userPassword !== null && $userPassword !== '')
+                throw new DemoUnsupportedException(0, "user_password");
+
             $this->parameters["user_password"] = $userPassword;
             return $this;
         }
 
         /**
-         * Set PDF owner password.
+         * Set PDF owner password. Not available in demo mode (DemoUnsupportedException is thrown).
          * @param mixed $ownerPassword PDF owner password.
+         * @throws DemoUnsupportedException
          * @return HtmlToPdfClient Reference to the current object.
          */
         public function setOwnerPassword($ownerPassword)
         {
+            if ($this->demoMode && $ownerPassword !== null && $ownerPassword !== '')
+                throw new DemoUnsupportedException(0, "owner_password");
+
             $this->parameters["owner_password"] = $ownerPassword;
             return $this;
         }
@@ -1363,6 +2028,21 @@ namespace SelectPdf\Api {
         public function setWebPageHeight($webPageHeight)
         {
             $this->parameters["web_page_height"] = $webPageHeight;
+            return $this;
+        }
+
+        /**
+         * Leave out the content below the web page height (set with setWebPageHeight) instead of letting the page flow onto further pages.
+         *
+         * When not set, each rendering engine keeps its own behavior: WebKit and WebKit Restricted leave the content out whenever a web page height is set,
+         * Blink and Chromium convert the whole page. Set it to True or False to choose explicitly. It needs a non-zero web page height; with 0 there is no
+         * height to fix the page at and the setting is ignored. With WebKit, a fixed size also cuts off content wider than the web page width.
+         * @param mixed $webPageFixedSize True to cut the page at the web page height, False to convert the whole page.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setWebPageFixedSize($webPageFixedSize)
+        {
+            $this->parameters["web_page_fixed_size"] = $this->serializeBoolean($webPageFixedSize);
             return $this;
         }
 
@@ -2153,6 +2833,30 @@ namespace SelectPdf\Api {
         }
 
         /**
+         * Set the user name for HTTP Basic authentication on the web page being converted. Use it together with setAuthPassword.
+         * The demo endpoint does not send credentials; it reports the value in getDroppedFields().
+         * @param mixed $authUsername User name for HTTP Basic authentication.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setAuthUsername($authUsername)
+        {
+            $this->parameters["auth_username"] = $authUsername;
+            return $this;
+        }
+
+        /**
+         * Set the password for HTTP Basic authentication on the web page being converted. Use it together with setAuthUsername.
+         * The demo endpoint does not send credentials; it reports the value in getDroppedFields().
+         * @param mixed $authPassword Password for HTTP Basic authentication.
+         * @return HtmlToPdfClient Reference to the current object.
+         */
+        public function setAuthPassword($authPassword)
+        {
+            $this->parameters["auth_password"] = $authPassword;
+            return $this;
+        }
+
+        /**
          * Set a custom parameter. Do not use this method unless advised by SelectPdf.
          * @param mixed $parameterName Parameter name.
          * @param mixed $parameterValue Parameter value.
@@ -2166,14 +2870,468 @@ namespace SelectPdf\Api {
      
         /**
          * Get the locations of certain web elements. This is retrieved if pdf_web_elements_selectors parameter is set and elements were found to match the selectors.
-         * 
+         * Not available in demo mode (DemoUnsupportedException is thrown).
+         *
+         * @throws ApiException
+         * @throws DemoUnsupportedException
          * @return Array with web elements locations.
          */
         public function getWebElements() {
+            $this->ensureNotDemo("pdf_web_elements_selectors");
+
             $webElementsClient = new WebElementsClient($this->parameters["key"], $this->jobId);
             $webElementsClient->setApiEndpoint($this->apiWebElementsEndpoint);
     
             return $webElementsClient->getWebElements();
+        }
+    }
+
+    /**
+     * Create ZUGFeRD / Factur-X hybrid electronic invoices with SelectPdf Online API.
+     *
+     * A hybrid electronic invoice is one PDF/A-3 file carrying both halves of the invoice: the page a human reads,
+     * and the XML a recipient's accounting system reads. This client converts a URL or an HTML string into the visible invoice
+     * and embeds the XML into it as an associated file, with the metadata invoice software looks for.
+     *
+     * It derives from HtmlToPdfClient, so every conversion setting - page size, margins, headers, footers, rendering engine - applies here too.
+     * Use the createFrom* methods rather than the inherited convert* methods: the invoice endpoint takes a multipart request,
+     * because the XML is uploaded as a file part.
+     *
+     * The carrier document must be PDF/A-3. The default is PdfStandard::PdfA3A, the accessible level, which the standards recommend
+     * because it makes the visible invoice readable by assistive technology as well as archivable. Because PdfA3A is a tagged standard,
+     * a request that does not set a rendering engine is promoted to Chromium by the API, which reports the engine used in the X-SelectPdf-Engine response header.
+     *
+     * There is no way to attach an invoice XML to an existing PDF you already have: the XML can only be embedded into a document created as PDF/A-3.
+     *
+     * ```php
+     * <?php
+     *  require("SelectPdf.Api.php");
+     *
+     *  $apiKey = "Your API key here";
+     *  $invoiceHtml = "<html><body><h1>Invoice INV-2026-001</h1></body></html>";
+     *  $invoiceXml = "factur-x.xml";
+     *  $localFile = "Invoice.pdf";
+     *
+     *  try {
+     *      $client = new SelectPdf\Api\InvoiceClient($apiKey);
+     *
+     *      $client
+     *          ->setInvoiceXmlFile($invoiceXml)
+     *          ->setZugferdProfile(SelectPdf\Api\ZugferdProfile::En16931)
+     *          ->setDocTitle("Invoice INV-2026-001");
+     *
+     *      $client->createFromHtmlStringToFile($invoiceHtml, $localFile);
+     *
+     *      echo ("Finished! Number of pages: " . $client->getNumberOfPages() . ".\n");
+     *  }
+     *  catch (Exception $ex) {
+     *      echo("An error occurred: " . $ex . ".\n");
+     *  }
+     *  ?>
+     * ```
+     */
+    class InvoiceClient extends HtmlToPdfClient {
+        /**
+         * The production endpoint for hybrid electronic invoices.
+         */
+        const InvoiceEndpoint = "https://selectpdf.com/api2/invoice/";
+
+        /**
+         * Construct the Invoice Client.
+         *
+         * Unlike HtmlToPdfClient, this client has no demo mode - the keyless demo endpoint does not produce electronic invoices - so an API key is required.
+         * @param mixed $apiKey API key.
+         * @throws ApiException Thrown when no API key is supplied.
+         */
+        public function __construct($apiKey)
+        {
+            if ($apiKey === null || $apiKey === '' || strtolower(trim($apiKey)) === 'demo') {
+                throw new ApiException("An API key is required to create electronic invoices. The keyless demo endpoint does not support them.");
+            }
+
+            parent::__construct($apiKey);
+
+            $this->apiEndpoint = self::InvoiceEndpoint;
+
+            // The carrier has to be PDF/A-3; default to the accessible level, which
+            // the standards recommend. Overridable with setPdfStandard.
+            $this->parameters["pdf_standard"] = PdfStandard::PdfA3A;
+        }
+
+        /**
+         * Set the invoice XML from a local file.
+         *
+         * Only the content of the file is used - the name recorded inside the PDF is the one the standard prescribes
+         * ("factur-x.xml", or "xrechnung.xml" for the XRECHNUNG profile), because recipients look it up by name.
+         * @param mixed $invoiceXmlFile Path to the local invoice XML file.
+         * @return InvoiceClient Reference to the current object.
+         */
+        public function setInvoiceXmlFile($invoiceXmlFile)
+        {
+            unset($this->binaryData["zugferd_xml"]);
+            $this->files["zugferd_xml"] = $invoiceXmlFile;
+            return $this;
+        }
+
+        /**
+         * Set the invoice XML from memory.
+         * @param mixed $invoiceXml The invoice XML (string, UTF-8 encoded).
+         * @return InvoiceClient Reference to the current object.
+         */
+        public function setInvoiceXml($invoiceXml)
+        {
+            unset($this->files["zugferd_xml"]);
+            $this->binaryData["zugferd_xml"] = $invoiceXml;
+            return $this;
+        }
+
+        /**
+         * Set the data profile of the invoice XML. Required.
+         * @param mixed $profile The invoice data profile. Possible values: Minimum, Basic_WL, Basic, En16931, Extended, XRechnung. Use constants from \SelectPdf\Api\ZugferdProfile class.
+         * @throws ApiException
+         * @return InvoiceClient Reference to the current object.
+         */
+        public function setZugferdProfile($profile)
+        {
+            if (!preg_match("/(?i)^(Minimum|Basic_WL|Basic|En16931|Extended|XRechnung)$/", $profile))
+                throw new ApiException("Allowed values for Zugferd Profile: Minimum, Basic_WL, Basic, En16931, Extended, XRechnung.");
+
+            $this->parameters["zugferd_profile"] = $profile;
+            return $this;
+        }
+
+        /**
+         * Set how the embedded XML relates to the visible invoice page.
+         *
+         * Optional. When not set, the API derives it from the profile: Alternative for Minimum and Basic_WL, which do not carry a complete invoice,
+         * and Data for the rest. Those two profiles combined with Data are rejected by the API.
+         * @param mixed $relationship The relationship between XML and page. Possible values: Data, Alternative, Source, Supplement. Use constants from \SelectPdf\Api\ZugferdRelationship class.
+         * @throws ApiException
+         * @return InvoiceClient Reference to the current object.
+         */
+        public function setZugferdRelationship($relationship)
+        {
+            if (!preg_match("/(?i)^(Data|Alternative|Source|Supplement)$/", $relationship))
+                throw new ApiException("Allowed values for Zugferd Relationship: Data, Alternative, Source, Supplement.");
+
+            $this->parameters["zugferd_relationship"] = $relationship;
+            return $this;
+        }
+
+        /**
+         * Set the metadata schema identifying the invoice. Defaults to FacturX10.
+         * @param mixed $schema The invoice metadata schema. Possible values: FacturX10, Zugferd20. Use constants from \SelectPdf\Api\ZugferdSchema class.
+         * @throws ApiException
+         * @return InvoiceClient Reference to the current object.
+         */
+        public function setZugferdSchema($schema)
+        {
+            if (!preg_match("/(?i)^(FacturX10|Zugferd20)$/", $schema))
+                throw new ApiException("Allowed values for Zugferd Schema: FacturX10, Zugferd20.");
+
+            $this->parameters["zugferd_schema"] = $schema;
+            return $this;
+        }
+
+        /**
+         * Create a hybrid electronic invoice from the invoice page at the specified url.
+         * @param mixed $url Url of the invoice page.
+         * @throws ApiException
+         * @return string String containing the resulted hybrid invoice PDF.
+         */
+        public function createFromUrl($url)
+        {
+            $this->prepareUrl($url);
+            $this->parameters["async"] = "False";
+            return $this->performPostAsMultipartFormData(null);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from the invoice page at the specified url and write it to an output stream.
+         * @param mixed $url Url of the invoice page.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function createFromUrlToStream($url, $stream)
+        {
+            $this->prepareUrl($url);
+            $this->parameters["async"] = "False";
+            $this->performPostAsMultipartFormData($stream);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from the invoice page at the specified url and write it to a local file.
+         * @param mixed $url Url of the invoice page.
+         * @param mixed $filePath Local file including path if necessary.
+         * @throws ApiException
+         */
+        public function createFromUrlToFile($url, $filePath)
+        {
+            $this->prepareUrl($url);
+            $this->parameters["async"] = "False";
+            $this->postToFile($filePath);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string.
+         * @param mixed $htmlString The invoice HTML.
+         * @throws ApiException
+         * @return string String containing the resulted hybrid invoice PDF.
+         */
+        public function createFromHtmlString($htmlString)
+        {
+            return $this->createFromHtmlStringWithBaseUrl($htmlString, null);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string. Use a base url to resolve relative paths to resources.
+         * @param mixed $htmlString The invoice HTML.
+         * @param mixed $baseUrl Base url used to resolve relative paths in the HTML.
+         * @throws ApiException
+         * @return string String containing the resulted hybrid invoice PDF.
+         */
+        public function createFromHtmlStringWithBaseUrl($htmlString, $baseUrl)
+        {
+            $this->prepareHtml($htmlString, $baseUrl);
+            $this->parameters["async"] = "False";
+            return $this->performPostAsMultipartFormData(null);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string and write it to an output stream.
+         * @param mixed $htmlString The invoice HTML.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function createFromHtmlStringToStream($htmlString, $stream)
+        {
+            $this->createFromHtmlStringWithBaseUrlToStream($htmlString, null, $stream);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string and write it to an output stream. Use a base url to resolve relative paths to resources.
+         * @param mixed $htmlString The invoice HTML.
+         * @param mixed $baseUrl Base url used to resolve relative paths in the HTML.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function createFromHtmlStringWithBaseUrlToStream($htmlString, $baseUrl, $stream)
+        {
+            $this->prepareHtml($htmlString, $baseUrl);
+            $this->parameters["async"] = "False";
+            $this->performPostAsMultipartFormData($stream);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string and write it to a local file.
+         * @param mixed $htmlString The invoice HTML.
+         * @param mixed $filePath Local file including path if necessary.
+         * @throws ApiException
+         */
+        public function createFromHtmlStringToFile($htmlString, $filePath)
+        {
+            $this->createFromHtmlStringWithBaseUrlToFile($htmlString, null, $filePath);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string and write it to a local file. Use a base url to resolve relative paths to resources.
+         * @param mixed $htmlString The invoice HTML.
+         * @param mixed $baseUrl Base url used to resolve relative paths in the HTML.
+         * @param mixed $filePath Local file including path if necessary.
+         * @throws ApiException
+         */
+        public function createFromHtmlStringWithBaseUrlToFile($htmlString, $baseUrl, $filePath)
+        {
+            $this->prepareHtml($htmlString, $baseUrl);
+            $this->parameters["async"] = "False";
+            $this->postToFile($filePath);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from the invoice page at the specified url, using an asynchronous call.
+         * Recommended for long invoice pages or callers that cannot hold an HTTP connection open for the whole conversion.
+         * @param mixed $url Url of the invoice page.
+         * @throws ApiException
+         * @return string String containing the resulted hybrid invoice PDF.
+         */
+        public function createFromUrlAsync($url)
+        {
+            $this->prepareUrl($url);
+            return $this->runAsyncJob();
+        }
+
+        /**
+         * Create a hybrid electronic invoice from the invoice page at the specified url, using an asynchronous call, and write it to an output stream.
+         * @param mixed $url Url of the invoice page.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function createFromUrlToStreamAsync($url, $stream)
+        {
+            $result = $this->createFromUrlAsync($url);
+            fwrite($stream, $result);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from the invoice page at the specified url, using an asynchronous call, and write it to a local file.
+         * @param mixed $url Url of the invoice page.
+         * @param mixed $filePath Local file including path if necessary.
+         * @throws ApiException
+         */
+        public function createFromUrlToFileAsync($url, $filePath)
+        {
+            $result = $this->createFromUrlAsync($url);
+            file_put_contents($filePath, $result);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string, using an asynchronous call.
+         * @param mixed $htmlString The invoice HTML.
+         * @throws ApiException
+         * @return string String containing the resulted hybrid invoice PDF.
+         */
+        public function createFromHtmlStringAsync($htmlString)
+        {
+            return $this->createFromHtmlStringWithBaseUrlAsync($htmlString, null);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string, using an asynchronous call. Use a base url to resolve relative paths to resources.
+         * @param mixed $htmlString The invoice HTML.
+         * @param mixed $baseUrl Base url used to resolve relative paths in the HTML.
+         * @throws ApiException
+         * @return string String containing the resulted hybrid invoice PDF.
+         */
+        public function createFromHtmlStringWithBaseUrlAsync($htmlString, $baseUrl)
+        {
+            $this->prepareHtml($htmlString, $baseUrl);
+            return $this->runAsyncJob();
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string, using an asynchronous call, and write it to an output stream.
+         * @param mixed $htmlString The invoice HTML.
+         * @param mixed $stream The output stream where the resulted PDF will be written.
+         * @throws ApiException
+         */
+        public function createFromHtmlStringToStreamAsync($htmlString, $stream)
+        {
+            $result = $this->createFromHtmlStringWithBaseUrlAsync($htmlString, null);
+            fwrite($stream, $result);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string, using an asynchronous call, and write it to a local file.
+         * @param mixed $htmlString The invoice HTML.
+         * @param mixed $filePath Local file including path if necessary.
+         * @throws ApiException
+         */
+        public function createFromHtmlStringToFileAsync($htmlString, $filePath)
+        {
+            $result = $this->createFromHtmlStringWithBaseUrlAsync($htmlString, null);
+            file_put_contents($filePath, $result);
+        }
+
+        /**
+         * Create a hybrid electronic invoice from a raw HTML string, using an asynchronous call, and write it to a local file. Use a base url to resolve relative paths to resources.
+         * @param mixed $htmlString The invoice HTML.
+         * @param mixed $baseUrl Base url used to resolve relative paths in the HTML.
+         * @param mixed $filePath Local file including path if necessary.
+         * @throws ApiException
+         */
+        public function createFromHtmlStringWithBaseUrlToFileAsync($htmlString, $baseUrl, $filePath)
+        {
+            $result = $this->createFromHtmlStringWithBaseUrlAsync($htmlString, $baseUrl);
+            file_put_contents($filePath, $result);
+        }
+
+        private function prepareUrl($url)
+        {
+            if (strncasecmp($url, "http://", 7) != 0 && strncasecmp($url, "https://", 8) != 0) {
+                throw new ApiException("The supported protocols for the converted webpage are http:// and https://.");
+            }
+            if (strncasecmp($url, "http://localhost", 16) === 0) {
+                throw new ApiException("Cannot convert local urls. SelectPdf online API can only convert publicly available urls.");
+            }
+
+            $this->requireInvoiceXml();
+            $this->parameters["url"] = $url;
+            $this->parameters["html"] = "";
+            $this->parameters["base_url"] = "";
+        }
+
+        private function prepareHtml($htmlString, $baseUrl)
+        {
+            $this->requireInvoiceXml();
+            $this->parameters["url"] = "";
+            $this->parameters["html"] = $htmlString;
+            $this->parameters["base_url"] = $baseUrl === null ? "" : $baseUrl;
+        }
+
+        // Fail here rather than spending a round trip on a request the API will
+        // reject with the same message.
+        private function requireInvoiceXml()
+        {
+            if (!isset($this->files["zugferd_xml"]) && !isset($this->binaryData["zugferd_xml"])) {
+                throw new ApiException("The invoice XML was not specified. Call setInvoiceXmlFile or setInvoiceXml before creating the invoice.");
+            }
+            if (!isset($this->parameters["zugferd_profile"]) || $this->parameters["zugferd_profile"] === '') {
+                throw new ApiException("The invoice profile was not specified. Call setZugferdProfile before creating the invoice.");
+            }
+        }
+
+        private function postToFile($filePath)
+        {
+            $outputFile = fopen($filePath, "wb");
+
+            try
+            {
+                $this->performPostAsMultipartFormData($outputFile);
+                fclose($outputFile);
+            }
+            catch(ApiException $ex)
+            {
+                fclose($outputFile);
+                unlink($filePath);
+                throw $ex;
+            }
+        }
+
+        private function runAsyncJob()
+        {
+            $JobID = $this->startAsyncJobMultipartFormData();
+
+            if ($JobID == null || $JobID === '')
+            {
+                throw new ApiException("An error occurred launching the asynchronous call.");
+            }
+
+            $noPings = 0;
+
+            do
+            {
+                $noPings++;
+
+                // sleep for a few seconds before next ping
+                sleep($this->AsyncCallsPingInterval);
+
+                $asyncJobClient = new AsyncJobClient($this->parameters["key"], $JobID);
+                $asyncJobClient->setApiEndpoint($this->apiAsyncEndpoint);
+
+                $result = $asyncJobClient->getResult();
+
+                if ($asyncJobClient->finished())
+                {
+                    $this->numberOfPages = $asyncJobClient->getNumberOfPages();
+                    $this->creditsTotal = $asyncJobClient->getCreditsTotal();
+                    $this->creditsRemaining = $asyncJobClient->getCreditsRemaining();
+
+                    return $result;
+                }
+
+            } while ($noPings <= $this->AsyncCallsMaxPings);
+
+            throw new ApiException("Asynchronous call did not finish in expected timeframe.");
         }
     }
 
